@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Street Go — 街の道で打つ囲碁</title>
+  <meta name="description" content="街の道路の交差点を囲碁盤にして打つブラウザゲーム。OpenStreetMap の道路データから盤面をつくります。" />
+  <meta property="og:title" content="Street Go — 街の道で打つ囲碁" />
+  <meta property="og:description" content="街の道路の交差点を囲碁盤にして打つブラウザゲーム。OpenStreetMap の道路データから盤面をつくります。" />
+  <meta property="og:type" content="website" />
+  <meta property="og:url" content="https://street-go.tansanfabrik.com/" />
+  <link rel="canonical" href="https://street-go.tansanfabrik.com/" />
+  <meta name="twitter:card" content="summary" />
+  <meta name="theme-color" content="#f6f7f9" />
+  <link
+    rel="icon"
+    type="image/svg+xml"
+    href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%23e9d8b4'/%3E%3Ccircle cx='22' cy='32' r='14' fill='%23111827'/%3E%3Ccircle cx='42' cy='32' r='14' fill='%23ffffff' stroke='%239ca3af' stroke-width='2'/%3E%3C/svg%3E"
+  />
+  <link
+    rel="stylesheet"
+    href="vendor/leaflet/leaflet.css"
+    integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+  />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div id="app">
+    <!-- Sidebar -->
+    <aside id="sidebar">
+      <header class="brand">
+        <div class="brand-logo">
+          <span class="stone-dot black"></span>
+          <span class="stone-dot white"></span>
+        </div>
+        <div>
+          <h1>Street Go</h1>
+          <p class="subtitle">街の交差点で打つ囲碁</p>
+        </div>
+      </header>
+
+      <!-- Board Setup -->
+      <section class="panel" id="setup-panel">
+        <h2>盤面をつくる</h2>
+        <form id="search-form">
+          <label class="field-label" for="place-input">地名・場所</label>
+          <div class="input-row">
+            <input
+              id="place-input"
+              type="text"
+              placeholder="例: 京都 四条烏丸、渋谷、下北沢"
+              value="京都 四条烏丸"
+              required
+            />
+            <button type="submit" id="generate-btn" class="btn primary">生成</button>
+          </div>
+          <p class="hint privacy-note">
+            入力した地名は OpenStreetMap の Nominatim に、範囲の座標は Overpass API（overpass-api.de / private.coffee）に送信されます。自宅住所などの個人情報は入力しないでください。
+          </p>
+        </form>
+
+        <button type="button" id="draw-square-btn" class="btn secondary draw-square-btn">
+          <span>□</span> 地図上で正方形を引いて盤面作成
+        </button>
+
+        <div class="presets">
+          <button type="button" class="chip" data-place="京都 四条烏丸">京都・四条烏丸</button>
+          <button type="button" class="chip" data-place="東京 渋谷駅">渋谷</button>
+          <button type="button" class="chip" data-place="東京 下北沢">下北沢</button>
+          <button type="button" class="chip" data-place="札幌 大通公園">札幌・大通</button>
+          <button type="button" class="chip" data-place="Paris Arc de Triomphe">パリ・凱旋門</button>
+        </div>
+
+        <div class="field-group">
+          <div class="field-header">
+            <label class="field-label" for="size-select">盤面のサイズ感（目標交点数）</label>
+            <span id="target-nodes-badge" class="badge">81 交点</span>
+          </div>
+          <select id="size-select">
+            <option value="36">ミニ盤（約36交点 / 6路相当）</option>
+            <option value="81" selected>9路盤相当（約81交点）</option>
+            <option value="169">13路盤相当（約169交点）</option>
+            <option value="250">16路盤相当（約250交点）</option>
+            <option value="361">19路盤相当（約361交点）</option>
+            <option value="custom">カスタム交点数...</option>
+          </select>
+          <div id="custom-size-row" class="custom-size-row hidden">
+            <input id="custom-size-input" type="range" min="20" max="400" step="5" value="81" />
+            <input id="custom-size-number" type="number" min="20" max="400" value="81" />
+          </div>
+        </div>
+
+        <details class="advanced-options">
+          <summary>詳細設定</summary>
+          <div class="field-group">
+            <label class="field-label" for="mode-select">対戦モード</label>
+            <select id="mode-select">
+              <option value="cpu" selected>CPU対戦（あなたが黒）</option>
+              <option value="pvp">対人（黒白交互）</option>
+            </select>
+          </div>
+          <div class="field-group">
+            <div class="field-header">
+              <label class="field-label" for="merge-radius">交差点の統合距離</label>
+              <span id="merge-radius-val" class="mono">18m</span>
+            </div>
+            <input id="merge-radius" type="range" min="5" max="40" step="1" value="18" />
+            <p class="hint">大通りの二重交差点などを1点にまとめます</p>
+          </div>
+          <label class="checkbox-row">
+            <input type="checkbox" id="include-deadends" checked />
+            <span>行き止まり（呼吸点1）も含める</span>
+          </label>
+          <label class="checkbox-row">
+            <input type="checkbox" id="subdivide-roads" />
+            <span>長い道路の途中にも交点を置く</span>
+          </label>
+          <div id="subdivide-spacing-group" class="field-group hidden">
+            <div class="field-header">
+              <label class="field-label" for="subdivide-spacing">中間点の間隔</label>
+              <span id="subdivide-spacing-val" class="mono">80m</span>
+            </div>
+            <input id="subdivide-spacing" type="range" min="30" max="250" step="10" value="80" />
+            <p class="hint">長い直線道路をこの間隔で分割して交点を追加します</p>
+          </div>
+          <div class="field-group">
+            <label class="field-label" for="map-style">地図スタイル</label>
+            <select id="map-style">
+              <option value="light" selected>ライト（見やすい）</option>
+              <option value="dark">ダーク</option>
+              <option value="osm">標準OSM</option>
+            </select>
+          </div>
+        </details>
+
+        <div id="status-bar" class="status-bar hidden">
+          <span class="spinner"></span>
+          <span id="status-text">地図データを取得中...</span>
+          <button type="button" id="cancel-generate-btn" class="btn secondary btn-sm status-cancel-btn">キャンセル</button>
+        </div>
+        <div id="error-box" class="error-box hidden"></div>
+      </section>
+
+      <!-- Game Info -->
+      <section class="panel" id="game-panel">
+        <div class="panel-title-row">
+          <h2>対局状況</h2>
+          <span id="board-stats" class="mono muted">未生成</span>
+        </div>
+
+        <div class="turn-banner" id="turn-banner">
+          <span class="stone-indicator black" id="turn-stone"></span>
+          <span id="turn-text">盤面を生成してください</span>
+        </div>
+
+        <div class="komi-row">
+          <span class="label">コミ（白に加算）</span>
+          <strong id="komi-value">—</strong>
+        </div>
+
+        <div class="score-cards">
+          <div class="score-card black-card">
+            <div class="score-card-header">
+              <span class="stone-dot black"></span>
+              <span>黒（先手）</span>
+            </div>
+            <div class="score-metrics">
+              <div><span class="label">盤上</span><strong id="black-stones">0</strong></div>
+              <div><span class="label">アゲハマ</span><strong id="black-captures">0</strong></div>
+              <div><span class="label">地</span><strong id="black-territory">0</strong></div>
+            </div>
+          </div>
+
+          <div class="score-card white-card">
+            <div class="score-card-header">
+              <span class="stone-dot white"></span>
+              <span>白（後手）</span>
+            </div>
+            <div class="score-metrics">
+              <div><span class="label">盤上</span><strong id="white-stones">0</strong></div>
+              <div><span class="label">アゲハマ</span><strong id="white-captures">0</strong></div>
+              <div><span class="label">地</span><strong id="white-territory">0</strong></div>
+            </div>
+          </div>
+        </div>
+
+        <div id="result-box" class="result-box hidden"></div>
+
+        <div class="action-buttons">
+          <button type="button" id="pass-btn" class="btn secondary" disabled>パス</button>
+          <button type="button" id="undo-btn" class="btn secondary" disabled>待った</button>
+          <button type="button" id="score-btn" class="btn secondary" disabled>形勢表示</button>
+          <button type="button" id="reset-btn" class="btn danger-outline" disabled>最初から</button>
+        </div>
+
+        <div class="rules-note">
+          <p><strong>ルール:</strong> 道の交点が着点、つながる道の数が呼吸点です。石にカーソルを合わせると、その連の残り呼吸点が光ります。</p>
+          <p>以前と同じ石の配置には戻せません（同形反復の禁止）。</p>
+          <p>終局時、盤上に残った石はすべて生きた石として数えます。取れる石は取り切ってからパスしてください。</p>
+        </div>
+      </section>
+
+      <footer class="site-footer">
+        地図・道路データ ©
+        <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a>
+        contributors (<a href="https://opendatacommons.org/licenses/odbl/" target="_blank" rel="noopener">ODbL</a>)
+      </footer>
+    </aside>
+
+    <!-- Map Canvas -->
+    <main id="map-container">
+      <div id="map"></div>
+      <div id="draw-banner" class="draw-banner hidden">
+        <span>地図上をドラッグして正方形の範囲を指定してください</span>
+        <span id="draw-size-label" class="mono"></span>
+        <button type="button" id="cancel-draw-btn" class="btn secondary btn-sm">キャンセル</button>
+      </div>
+      <div id="hover-hud" class="hover-hud hidden"></div>
+      <div id="toast" class="toast hidden"></div>
+    </main>
+  </div>
+
+  <script
+    src="vendor/leaflet/leaflet.js"
+    integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+  ></script>
+  <script src="map-graph.js"></script>
+  <script src="go-engine.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
