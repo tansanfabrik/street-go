@@ -48,6 +48,7 @@
   const mergeRadiusInput = document.getElementById('merge-radius');
   const mergeRadiusVal = document.getElementById('merge-radius-val');
   const includeDeadEndsInput = document.getElementById('include-deadends');
+  const includeFootwaysInput = document.getElementById('include-footways');
   const subdivideRoadsInput = document.getElementById('subdivide-roads');
   const subdivideSpacingGroup = document.getElementById('subdivide-spacing-group');
   const subdivideSpacingInput = document.getElementById('subdivide-spacing');
@@ -133,7 +134,7 @@
     isGenerating = loading;
     generateBtn.disabled = loading;
     drawSquareBtn.disabled = loading;
-    cancelGenerateBtn.disabled = !loading;
+    if (cancelGenerateBtn) cancelGenerateBtn.disabled = !loading;
     if (loading) {
       statusText.textContent = msg;
       statusBar.classList.remove('hidden');
@@ -352,11 +353,53 @@
           e.preventDefault();
           e.stopPropagation();
           handleNodeClick(id);
+        } else if (ARROW_DIRECTIONS[e.key]) {
+          // Arrow keys move the focus along a road to the neighbour in that direction
+          // (stones included; focusing shows the liberties like hovering does)
+          e.preventDefault();
+          e.stopPropagation();
+          const next = neighborInDirection(id, ARROW_DIRECTIONS[e.key]);
+          if (next !== null) {
+            const target = nodeMarkers.get(next);
+            if (target) target.wrapper.focus();
+          }
         }
       });
       wrapper.addEventListener('focus', () => handleNodeHover(id));
       wrapper.addEventListener('blur', () => handleNodeLeave());
     }
+  }
+
+  // Screen directions for the arrow keys (container pixels, y grows downwards)
+  const ARROW_DIRECTIONS = {
+    ArrowUp: [0, -1],
+    ArrowDown: [0, 1],
+    ArrowLeft: [-1, 0],
+    ArrowRight: [1, 0]
+  };
+
+  // Road-connected neighbour of `id` closest to the given screen direction (within 90 deg)
+  function neighborInDirection(id, [dx, dy]) {
+    if (!currentBoardData) return null;
+    const node = currentBoardData.nodes.get(id);
+    if (!node) return null;
+    const p0 = map.latLngToContainerPoint([node.lat, node.lon]);
+    let best = null;
+    let bestCos = 0;
+    for (const nb of node.neighbors) {
+      const n = currentBoardData.nodes.get(nb);
+      const p = map.latLngToContainerPoint([n.lat, n.lon]);
+      const vx = p.x - p0.x;
+      const vy = p.y - p0.y;
+      const len = Math.hypot(vx, vy);
+      if (len === 0) continue;
+      const cos = (vx * dx + vy * dy) / len;
+      if (cos > bestCos) {
+        bestCos = cos;
+        best = nb;
+      }
+    }
+    return best;
   }
 
   function nodeKindLabel(node) {
@@ -392,7 +435,7 @@
 
       if (stone === null) {
         classes.push('empty');
-        if (!engine.gameOver && !cpuThinking) {
+        if (!engine.gameOver && !cpuThinking && !isGenerating) {
           classes.push(`preview-${engine.turn}`);
         }
         if (showTerritory || engine.gameOver) {
@@ -420,7 +463,7 @@
     whiteStonesEl.textContent = score.whiteStones;
     whiteCapturesEl.textContent = score.whiteCaptures;
     whiteTerritoryEl.textContent = score.whiteTerritory;
-    komiValueEl.textContent = `${score.komi}目`;
+    if (komiValueEl) komiValueEl.textContent = `${score.komi}目`;
 
     // Turn Banner
     if (engine.gameOver) {
@@ -445,11 +488,11 @@
       }
     }
 
-    passBtn.disabled = engine.gameOver || cpuThinking;
-    undoBtn.disabled = engine.history.length === 0 || cpuThinking;
-    scoreBtn.disabled = false;
+    passBtn.disabled = engine.gameOver || cpuThinking || isGenerating;
+    undoBtn.disabled = engine.history.length === 0 || cpuThinking || isGenerating;
+    scoreBtn.disabled = isGenerating;
     scoreBtn.classList.toggle('active', showTerritory || engine.gameOver);
-    resetBtn.disabled = cpuThinking;
+    resetBtn.disabled = cpuThinking || isGenerating;
   }
 
   // Interactions
@@ -532,7 +575,7 @@
       return;
     }
 
-    if (engine.gameOver || cpuThinking) return;
+    if (engine.gameOver || cpuThinking || isGenerating) return;
     if (modeSelect.value === 'cpu' && engine.turn === 'W') return;
 
     const res = engine.playMove(id);
@@ -562,7 +605,7 @@
   }
 
   function maybeTriggerCpuTurn() {
-    if (!engine || engine.gameOver) return;
+    if (!engine || engine.gameOver || isGenerating) return;
     if (modeSelect.value !== 'cpu' || engine.turn !== 'W') return;
     if (cpuTimer !== null) return; // already scheduled: never more than one
 
@@ -577,6 +620,7 @@
       if (
         !engine ||
         engine !== scheduledEngine ||
+        isGenerating ||
         modeSelect.value !== 'cpu' ||
         engine.turn !== 'W' ||
         engine.gameOver
@@ -636,8 +680,11 @@
   function getBoardOptions() {
     return {
       targetNodes: getTargetNodes(),
-      mergeRadiusMeters: parseInt(mergeRadiusInput.value, 10) || 18,
+      mergeRadiusMeters: parseInt(mergeRadiusInput.value, 10) || 30,
       includeDeadEnds: includeDeadEndsInput.checked,
+      // Footpaths / alleys use a separate Overpass query; no bundled data for it.
+      // Changing it never triggers a request by itself: it applies on the next generation.
+      includeFootways: includeFootwaysInput ? includeFootwaysInput.checked : false,
       subdivideLongRoads: subdivideRoadsInput.checked,
       subdivideSpacingMeters: parseInt(subdivideSpacingInput.value, 10) || 80
     };
@@ -656,6 +703,9 @@
     generateController = controller;
     setLoading(true, startMsg);
     hoverHud.classList.add('hidden');
+    // The current board is frozen while the next one is being built
+    cancelCpuTurn();
+    if (engine) renderGameState();
 
     try {
       const boardData = await task(controller.signal, (msg) => {
@@ -672,7 +722,11 @@
     } finally {
       if (generateController === controller) generateController = null;
       setLoading(false);
-      if (engine) renderGameState();
+      if (engine) {
+        // Failure / cancel: resume the previous board where it stopped (CPU included)
+        renderGameState();
+        maybeTriggerCpuTurn();
+      }
     }
   }
 
@@ -693,7 +747,7 @@
     );
   }
 
-  cancelGenerateBtn.addEventListener('click', () => {
+  if (cancelGenerateBtn) cancelGenerateBtn.addEventListener('click', () => {
     if (generateController) generateController.abort();
   });
 
@@ -939,7 +993,7 @@
   });
 
   passBtn.addEventListener('click', () => {
-    if (!engine || engine.gameOver || cpuThinking) return;
+    if (!engine || engine.gameOver || cpuThinking || isGenerating) return;
     const res = engine.pass();
     if (!res.ok) return;
     const colorName = res.passedColor === 'B' ? '黒' : '白';
@@ -954,7 +1008,7 @@
   });
 
   undoBtn.addEventListener('click', () => {
-    if (!engine || cpuThinking || engine.history.length === 0) return;
+    if (!engine || cpuThinking || isGenerating || engine.history.length === 0) return;
     cancelCpuTurn();
     engine.undo();
     // In CPU mode, if it's now CPU's turn, undo one more step back to human's turn
@@ -967,13 +1021,13 @@
   });
 
   scoreBtn.addEventListener('click', () => {
-    if (!engine) return;
+    if (!engine || isGenerating) return;
     showTerritory = !showTerritory;
     renderGameState();
   });
 
   resetBtn.addEventListener('click', () => {
-    if (!engine || cpuThinking) return;
+    if (!engine || cpuThinking || isGenerating) return;
     cancelCpuTurn();
     engine.reset();
     showTerritory = false;
@@ -986,5 +1040,9 @@
   // (no Nominatim / Overpass request on page load).
   updateTargetBadge();
   placeInput.value = INITIAL_PRESET;
+  // Elements added in later versions may be missing if an old cached HTML is paired with
+  // this script; every such element is optional and falls back to its default.
+  if (includeFootwaysInput) includeFootwaysInput.checked = false; // bundled data is the simple query
+  mergeRadiusVal.textContent = `${mergeRadiusInput.value}m`; // in case the browser restored the slider
   generateBoard(INITIAL_PRESET, { allowNetwork: false });
 })();

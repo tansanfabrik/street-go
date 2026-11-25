@@ -724,3 +724,7 @@ select:focus {
     border-bottom: 1px solid var(--border);
   }
 }
+
+.footways-hint {
+  margin: -6px 0 10px 24px;
+}

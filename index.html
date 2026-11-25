@@ -19,10 +19,10 @@
   />
   <link
     rel="stylesheet"
-    href="vendor/leaflet/leaflet.css"
+    href="vendor/leaflet/leaflet.css?v=2"
     integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
   />
-  <link rel="stylesheet" href="style.css" />
+  <link rel="stylesheet" href="style.css?v=2" />
 </head>
 <body>
   <div id="app">
@@ -102,15 +102,20 @@
           <div class="field-group">
             <div class="field-header">
               <label class="field-label" for="merge-radius">交差点の統合距離</label>
-              <span id="merge-radius-val" class="mono">18m</span>
+              <span id="merge-radius-val" class="mono">30m</span>
             </div>
-            <input id="merge-radius" type="range" min="5" max="40" step="1" value="18" />
+            <input id="merge-radius" type="range" min="5" max="60" step="1" value="30" />
             <p class="hint">大通りの二重交差点などを1点にまとめます</p>
           </div>
           <label class="checkbox-row">
-            <input type="checkbox" id="include-deadends" checked />
+            <input type="checkbox" id="include-deadends" />
             <span>行き止まり（呼吸点1）も含める</span>
           </label>
+          <label class="checkbox-row">
+            <input type="checkbox" id="include-footways" autocomplete="off" />
+            <span>歩道・路地も含める</span>
+          </label>
+          <p class="hint footways-hint">オンにすると、プリセットでも Overpass API から道路データを取得します</p>
           <label class="checkbox-row">
             <input type="checkbox" id="subdivide-roads" />
             <span>長い道路の途中にも交点を置く</span>
@@ -196,6 +201,7 @@
         <div class="rules-note">
           <p><strong>ルール:</strong> 道の交点が着点、つながる道の数が呼吸点です。石にカーソルを合わせると、その連の残り呼吸点が光ります。</p>
           <p>以前と同じ石の配置には戻せません（同形反復の禁止）。</p>
+          <p>盤面を単純にするため、1つの交点につながる道は最大4本にし、立体交差などで交わる道は一部を外しています。</p>
           <p>終局時、盤上に残った石はすべて生きた石として数えます。取れる石は取り切ってからパスしてください。</p>
         </div>
       </section>
@@ -221,11 +227,11 @@
   </div>
 
   <script
-    src="vendor/leaflet/leaflet.js"
+    src="vendor/leaflet/leaflet.js?v=2"
     integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
   ></script>
-  <script src="map-graph.js"></script>
-  <script src="go-engine.js"></script>
-  <script src="app.js"></script>
+  <script src="map-graph.js?v=2"></script>
+  <script src="go-engine.js?v=2"></script>
+  <script src="app.js?v=2"></script>
 </body>
 </html>

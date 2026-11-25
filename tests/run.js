@@ -99,6 +99,10 @@ function withFetch(stub, fn) {
     });
 }
 
+async function localPresetFetcher(file) {
+  return JSON.parse(fs.readFileSync(path.join(ROOT, file.split('?')[0]), 'utf8'));
+}
+
 function noNetwork() {
   return async (url) => {
     throw new Error(`unexpected network access: ${url}`);
@@ -470,17 +474,223 @@ test('Nominatim requests are spaced at least 1.1 s apart', async () => {
 // ---------------------------------------------------------------------------
 // Bundled presets
 
-test('bundled presets: size limit and playable default boards without network', async () => {
+// Build a node map + edge list from [id, x(m), y(m)] points and [u, v] pairs (straight edges)
+function planarGraph(points, links) {
+  const nodes = new Map();
+  for (const [id, x, y] of points) {
+    nodes.set(id, { id, lat: 35 + y / 110540, lon: 135 + x / (111320 * Math.cos((35 * Math.PI) / 180)), neighbors: new Set() });
+  }
+  const edges = links.map(([u, v]) => {
+    nodes.get(u).neighbors.add(v);
+    nodes.get(v).neighbors.add(u);
+    const a = nodes.get(u);
+    const b = nodes.get(v);
+    return { u, v, coords: [[a.lat, a.lon], [b.lat, b.lon]] };
+  });
+  return { nodes, edges };
+}
+
+function isConnected(nodes) {
+  if (nodes.size === 0) return false;
+  const start = nodes.keys().next().value;
+  const seen = new Set([start]);
+  const stack = [start];
+  while (stack.length) {
+    for (const nb of nodes.get(stack.pop()).neighbors) {
+      if (!seen.has(nb)) { seen.add(nb); stack.push(nb); }
+    }
+  }
+  return seen.size === nodes.size;
+}
+
+function maxDeg(nodes) {
+  let m = 0;
+  for (const n of nodes.values()) m = Math.max(m, n.neighbors.size);
+  return m;
+}
+
+function minNodeDistance(nodes) {
+  const arr = Array.from(nodes.values());
+  let m = Infinity;
+  for (let i = 0; i < arr.length; i++) {
+    for (let j = i + 1; j < arr.length; j++) {
+      m = Math.min(m, SGM.distanceMeters(arr[i].lat, arr[i].lon, arr[j].lat, arr[j].lon));
+    }
+  }
+  return m;
+}
+
+test('S6: crossing edges without a shared node are resolved (longer one removed)', () => {
+  // Square with both diagonals; the diagonals cross in the middle. A-C is longer.
+  const g = planarGraph(
+    [['A', 0, 0], ['B', 100, 0], ['C', 110, 100], ['D', 0, 100]],
+    [['A', 'B'], ['B', 'C'], ['C', 'D'], ['D', 'A'], ['A', 'C'], ['B', 'D']]
+  );
+  assert.strictEqual(SGM.countEdgeCrossings(g.nodes, g.edges), 1);
+  const out = SGM.simplifyBoardGraph(g.nodes, g.edges, { includeDeadEnds: true });
+  assert.strictEqual(SGM.countEdgeCrossings(out.nodes, out.edges), 0);
+  assert.strictEqual(out.info.crossingsRemaining, 0);
+  assert.strictEqual(out.edges.length, 5);
+  assert.ok(!out.edges.some((e) => (e.u === 'A' && e.v === 'C') || (e.u === 'C' && e.v === 'A')), 'longer diagonal A-C should go');
+  assert.ok(isConnected(out.nodes));
+  // input not mutated
+  assert.strictEqual(g.edges.length, 6);
+  assert.strictEqual(g.nodes.get('A').neighbors.size, 3);
+});
+
+test('S6: a crossing between two bridges is kept and reported', () => {
+  // a-b and c-d cross; they are only linked through b-x-c, so both are bridges
+  const g = planarGraph(
+    [['a', 0, 50], ['b', 100, 50], ['c', 50, 0], ['d', 50, 100], ['x', 150, -50]],
+    [['a', 'b'], ['c', 'd'], ['b', 'x'], ['x', 'c']]
+  );
+  const out = SGM.simplifyBoardGraph(g.nodes, g.edges, { includeDeadEnds: true });
+  assert.strictEqual(out.edges.length, 4);
+  assert.strictEqual(out.info.crossingsRemaining, 1);
+  assert.ok(isConnected(out.nodes));
+});
+
+test('S6: an edge crossing several others is removed first', () => {
+  // A long "overpass" P-Q crosses three parallel streets of a ladder
+  const pts = [];
+  const links = [];
+  for (let k = 0; k < 4; k++) {
+    pts.push([`L${k}`, 0, k * 100], [`R${k}`, 300, k * 100]);
+    links.push([`L${k}`, `R${k}`]);
+    if (k > 0) links.push([`L${k - 1}`, `L${k}`], [`R${k - 1}`, `R${k}`]);
+  }
+  pts.push(['P', 150, -50], ['Q', 150, 350]);
+  links.push(['P', 'L0'], ['Q', 'R3'], ['P', 'Q']);
+  const g = planarGraph(pts, links);
+  assert.strictEqual(SGM.countEdgeCrossings(g.nodes, g.edges), 4);
+  const out = SGM.simplifyBoardGraph(g.nodes, g.edges, { includeDeadEnds: true });
+  assert.strictEqual(out.info.crossingsRemaining, 0);
+  assert.strictEqual(out.info.removedEdges, 1, 'only the overpass should be removed');
+  assert.ok(isConnected(out.nodes));
+});
+
+test('S7: degree is capped at 4 while staying connected', () => {
+  // Wheel: hub H with 6 spokes, rim r0..r5 forms a cycle
+  const pts = [['H', 0, 0]];
+  const links = [];
+  for (let k = 0; k < 6; k++) {
+    const a = (k * Math.PI) / 3;
+    pts.push([`r${k}`, 100 * Math.cos(a), 100 * Math.sin(a)]);
+    links.push(['H', `r${k}`], [`r${k}`, `r${(k + 1) % 6}`]);
+  }
+  const g = planarGraph(pts, links);
+  const out = SGM.simplifyBoardGraph(g.nodes, g.edges, { includeDeadEnds: true });
+  assert.ok(maxDeg(out.nodes) <= 4, `max degree ${maxDeg(out.nodes)}`);
+  assert.strictEqual(out.nodes.get('H').neighbors.size, 4);
+  assert.strictEqual(out.info.overDegreeRemaining, 0);
+  assert.strictEqual(out.nodes.size, 7);
+  assert.ok(isConnected(out.nodes));
+});
+
+test('S7: edges whose removal would disconnect are kept (reported in stats)', () => {
+  // Hub with 4 dead-end spokes and a triangle H-p-q: only one of H-p / H-q can go
+  const g = planarGraph(
+    [['H', 0, 0], ['p', 100, 0], ['q', 100, 100], ['l1', -100, 0], ['l2', 0, -100], ['l3', -100, -100], ['l4', -100, 100]],
+    [['H', 'p'], ['H', 'q'], ['p', 'q'], ['H', 'l1'], ['H', 'l2'], ['H', 'l3'], ['H', 'l4']]
+  );
+  const out = SGM.simplifyBoardGraph(g.nodes, g.edges, { includeDeadEnds: true });
+  assert.strictEqual(out.nodes.get('H').neighbors.size, 5);
+  assert.strictEqual(out.info.overDegreeRemaining, 1);
+  assert.ok(isConnected(out.nodes));
+  assert.strictEqual(out.nodes.size, 7);
+});
+
+test('S8: dead ends created by simplification are pruned when excluded', () => {
+  // 3x3 grid of 100 m blocks (16 points) plus one dangling spur
+  const pts = [];
+  const links = [];
+  for (let y = 0; y < 4; y++) {
+    for (let x = 0; x < 4; x++) {
+      pts.push([`${x},${y}`, x * 100, y * 100]);
+      if (x > 0) links.push([`${x - 1},${y}`, `${x},${y}`]);
+      if (y > 0) links.push([`${x},${y - 1}`, `${x},${y}`]);
+    }
+  }
+  pts.push(['spur', 450, 150]);
+  links.push(['3,1', 'spur']);
+  const g = planarGraph(pts, links);
+  const without = SGM.simplifyBoardGraph(g.nodes, g.edges, { includeDeadEnds: false });
+  assert.ok(!without.nodes.has('spur'));
+  assert.strictEqual(without.nodes.size, 16);
+  const withSpur = SGM.simplifyBoardGraph(g.nodes, g.edges, { includeDeadEnds: true });
+  assert.ok(withSpur.nodes.has('spur'));
+});
+
+test('road modes: simple query drops footpaths, tunnels and covered ways; caches do not mix', async () => {
+  const simple = SGM.buildOverpassQuery(35, 135, 500, 'simple');
+  for (const w of ['footway', 'path', 'steps', 'cycleway', 'service', 'track', 'bridleway']) {
+    assert.ok(new RegExp(`\\|${w}[|)]`).test(simple), `simple query should exclude ${w}`);
+  }
+  assert.ok(simple.includes('(if: !is_tag("tunnel") || t["tunnel"] == "no")') && simple.includes('["covered"!="yes"]'));
+  assert.ok(!/pedestrian|living_street/.test(simple), 'pedestrian / living_street must stay');
+  const all = SGM.buildOverpassQuery(35, 135, 500, 'all');
+  assert.ok(!/footway\|path|service/.test(all) && !all.includes('tunnel'));
+
   SGM.clearCaches();
-  SGM.setPresetFetcher(async (file) => JSON.parse(fs.readFileSync(path.join(ROOT, file), 'utf8')));
+  SGM.seedRoadCache(35, 135, 1000, gridElements(4, 35, 135, 1), false, 'simple');
+  let calls = 0;
+  const els = gridElements(3, 35, 135, 1);
+  await withFetch(async (url, opts) => {
+    calls++;
+    assert.ok(decodeURIComponent(opts.body).includes('"highway"!~"^(proposed|construction|abandoned|platform|bus_stop|elevator|corridor)$"'));
+    return jsonResponse(200, { elements: els });
+  }, async () => {
+    assert.ok(await SGM.fetchOverpassRoads(35, 135, 300, { mode: 'simple' })); // cached
+    assert.strictEqual(calls, 0);
+    await SGM.fetchOverpassRoads(35, 135, 300, { mode: 'all' }); // different mode -> network
+    assert.strictEqual(calls, 1);
+    await SGM.fetchOverpassRoads(35, 135, 300, { mode: 'all' }); // now cached for "all"
+    assert.strictEqual(calls, 1);
+  });
+  SGM.clearCaches();
+});
+
+test('presets with footpaths enabled: geocode from bundle, roads from Overpass', async () => {
+  SGM.clearCaches();
+  SGM.setPresetFetcher(localPresetFetcher);
+  const urls = [];
+  await withFetch(async (url) => {
+    urls.push(url);
+    return jsonResponse(429, {});
+  }, () => rejectsKind(SGM.generateStreetGoBoard('東京 下北沢', { targetNodes: 81, includeFootways: true }), 'busy'));
+  assert.strictEqual(urls.length, 1);
+  assert.ok(urls[0].includes('overpass'), 'no Nominatim request for a preset name');
+  SGM.clearCaches();
+});
+
+test('defaults: merge radius 30 m, dead ends excluded', () => {
+  assert.strictEqual(SGM.DEFAULT_MERGE_RADIUS_M, 30);
+  assert.strictEqual(SGM.MAX_NODE_DEGREE, 4);
+  const html = fs.readFileSync(path.join(ROOT, 'index.html'), 'utf8');
+  assert.ok(/id="merge-radius"[^>]*max="60"[^>]*value="30"/.test(html));
+  assert.ok(/<input type="checkbox" id="include-deadends" \/>/.test(html));
+  assert.ok(/<input type="checkbox" id="include-footways" autocomplete="off" \/>/.test(html));
+});
+
+test('bundled presets x 36/81/169 with default settings: simple, planar, spaced, connected', async () => {
+  SGM.clearCaches();
+  SGM.setPresetFetcher(localPresetFetcher);
   assert.strictEqual(SGM.PRESETS.length, 5);
   await withFetch(noNetwork(), async () => {
     for (const p of SGM.PRESETS) {
+      const data = JSON.parse(fs.readFileSync(path.join(ROOT, p.file), 'utf8'));
+      assert.strictEqual(data.roadMode, 'simple', `${p.file} roadMode`);
       const size = fs.statSync(path.join(ROOT, p.file)).size;
       assert.ok(size <= 1.5 * 1024 * 1024, `${p.file} is ${size} bytes`);
       for (const target of [36, 81, 169]) {
-        const b = await SGM.generateStreetGoBoard(p.query, { targetNodes: target, mergeRadiusMeters: 18, includeDeadEnds: true }, null, { allowNetwork: true });
-        assert.ok(b.stats.nodeCount >= 9 && b.stats.nodeCount <= 450, `${p.query} ${target}: ${b.stats.nodeCount}`);
+        const label = `${p.query} ${target}`;
+        const b = await SGM.generateStreetGoBoard(p.query, { targetNodes: target }, null, { allowNetwork: true });
+        assert.ok(b.stats.nodeCount >= 9 && b.stats.nodeCount <= 450, `${label}: ${b.stats.nodeCount}`);
+        assert.ok(maxDeg(b.nodes) <= 4, `${label}: max degree ${maxDeg(b.nodes)}`);
+        assert.strictEqual(SGM.countEdgeCrossings(b.nodes, b.edges), 0, `${label}: crossings`);
+        assert.ok(minNodeDistance(b.nodes) >= SGM.DEFAULT_MERGE_RADIUS_M, `${label}: min distance ${minNodeDistance(b.nodes)}`);
+        assert.ok(isConnected(b.nodes), `${label}: not connected`);
+        for (const n of b.nodes.values()) assert.ok(n.neighbors.size > 0, `${label}: isolated point`);
       }
     }
     // Offline initial board even if a large size was restored by the browser
@@ -488,6 +698,258 @@ test('bundled presets: size limit and playable default boards without network', 
     assert.ok(big.stats.nodeCount >= 9 && big.stats.nodeCount <= 450);
   });
   SGM.clearCaches();
+});
+
+// ---------------------------------------------------------------------------
+// Review fixes (F1-F13)
+
+function readPreset(file) {
+  return JSON.parse(fs.readFileSync(path.join(ROOT, file.split('?')[0]), 'utf8'));
+}
+
+function seedPresetRoads(name) {
+  const d = readPreset(`presets/${name}.json`);
+  SGM.seedRoadCache(d.location.lat, d.location.lon, d.radius, d.elements, true, 'simple');
+  return d;
+}
+
+function squareAround(lat, lon, sideM) {
+  const h = sideM / 2;
+  const dLat = h / 111000;
+  const dLon = h / (111000 * Math.cos((lat * Math.PI) / 180));
+  return { south: lat - dLat, north: lat + dLat, west: lon - dLon, east: lon + dLon };
+}
+
+// n x n street grid with the given spacing in metres
+function meterGrid(n, spacingM, lat0, lon0) {
+  const els = [];
+  const dLat = spacingM / 111195;
+  const dLon = spacingM / (111195 * Math.cos((lat0 * Math.PI) / 180));
+  const id = (x, y) => 1 + y * n + x;
+  for (let y = 0; y < n; y++) {
+    for (let x = 0; x < n; x++) els.push({ type: 'node', id: id(x, y), lat: lat0 + y * dLat, lon: lon0 + x * dLon });
+  }
+  let w = 1;
+  for (let y = 0; y < n; y++) els.push({ type: 'way', id: w++, nodes: Array.from({ length: n }, (_, x) => id(x, y)) });
+  for (let x = 0; x < n; x++) els.push({ type: 'way', id: w++, nodes: Array.from({ length: n }, (_, y) => id(x, y)) });
+  return { els, center: [lat0 + ((n - 1) / 2) * dLat, lon0 + ((n - 1) / 2) * dLon] };
+}
+
+test('F12a: clusters whose centroids end up within the radius are merged again', () => {
+  // Points on one street at 0, 5, 35 and 40 m. Leader clustering gives {0,5,35} and {40};
+  // their centroids are 26.7 m apart, so the second step must merge them into one point.
+  const k = 111195 * Math.cos((35 * Math.PI) / 180);
+  const js = [0, 5, 35, 40].map((x, i) => ({ id: `p${i}`, lat: 35, lon: 135 + x / k, deg: 3 }));
+  const cl = SGM.clusterJunctions(js, 30);
+  assert.strictEqual(cl.length, 1, `got ${cl.length} clusters`);
+  assert.strictEqual(cl[0].members.length, 4);
+  assert.ok(Math.abs((cl[0].lon - 135) * k - 20) < 0.01, 'merged point sits at the centroid (20 m)');
+});
+
+test('F12a: points never closer than the merge radius, and no chaining (F3)', () => {
+  // Five points 25 m apart in a row: single linkage would make one 100 m blob
+  const k = 111195 * Math.cos((35 * Math.PI) / 180);
+  const js = [0, 25, 50, 75, 100].map((x, i) => ({ id: `q${i}`, lat: 35, lon: 135 + x / k, deg: 3 }));
+  const cl = SGM.clusterJunctions(js, 30);
+  assert.ok(cl.length >= 2, 'a 100 m row must not collapse into one point');
+  for (const c of cl) {
+    for (const a of c.members) for (const b of c.members) {
+      assert.ok(SGM.distanceMeters(a.lat, a.lon, b.lat, b.lon) <= 60 + 1e-6, 'cluster diameter <= 2 x radius');
+    }
+  }
+  for (let i = 0; i < cl.length; i++) {
+    for (let j = i + 1; j < cl.length; j++) {
+      assert.ok(SGM.distanceMeters(cl[i].lat, cl[i].lon, cl[j].lat, cl[j].lon) >= 30, 'spacing >= radius');
+    }
+  }
+});
+
+test('F3: a dense 25 m grid with a 30 m merge radius keeps a board', () => {
+  const g = meterGrid(12, 25, 35, 135);
+  const b = SGM.buildRoadGraph(g.els, g.center[0], g.center[1], { targetNodes: 400, mergeRadiusMeters: 30 });
+  assert.ok(b.stats.nodeCount >= 9, `only ${b.stats.nodeCount} points`);
+  assert.ok(minNodeDistance(b.nodes) >= 30);
+  assert.ok(isConnected(b.nodes));
+  assert.ok(maxDeg(b.nodes) <= 4);
+});
+
+test('F12b: T-shaped and collinear endpoint contacts count as crossings', () => {
+  // T: C touches the middle of A-B
+  const t = planarGraph([['A', 0, 0], ['B', 100, 0], ['C', 50, 0], ['D', 50, 100]], [['A', 'B'], ['C', 'D']]);
+  assert.strictEqual(SGM.countEdgeCrossings(t.nodes, t.edges), 1);
+  // Collinear overlap: C-D lies on the same line and starts inside A-B
+  const c = planarGraph([['A', 0, 0], ['B', 100, 0], ['C', 60, 0], ['D', 150, 0]], [['A', 'B'], ['C', 'D']]);
+  assert.strictEqual(SGM.countEdgeCrossings(c.nodes, c.edges), 1);
+  // Collinear endpoint contact: C-D starts exactly at B's position (different point id)
+  const e = planarGraph([['A', 0, 0], ['B', 100, 0], ['C', 100, 0.0], ['D', 150, 0]], [['A', 'B'], ['C', 'D']]);
+  assert.strictEqual(SGM.countEdgeCrossings(e.nodes, e.edges), 1);
+  // Collinear but apart: no contact
+  const d = planarGraph([['A', 0, 0], ['B', 100, 0], ['C', 120, 0], ['D', 150, 0]], [['A', 'B'], ['C', 'D']]);
+  assert.strictEqual(SGM.countEdgeCrossings(d.nodes, d.edges), 0);
+});
+
+test('F12c: a dead end that appears only after removing a crossing edge is pruned', () => {
+  // 4x4 points (100 m blocks) + X inside the top-middle block. X-(3,1) crosses two grid
+  // edges and is removed; X is then left with one road (to (1,3)) and must be pruned.
+  const pts = [];
+  const links = [];
+  for (let y = 0; y < 4; y++) {
+    for (let x = 0; x < 4; x++) {
+      pts.push([`${x},${y}`, x * 100, y * 100]);
+      if (x > 0) links.push([`${x - 1},${y}`, `${x},${y}`]);
+      if (y > 0) links.push([`${x},${y - 1}`, `${x},${y}`]);
+    }
+  }
+  pts.push(['X', 130, 260]);
+  links.push(['X', '3,1'], ['X', '1,3']);
+  const g = planarGraph(pts, links);
+  assert.strictEqual(SGM.countEdgeCrossings(g.nodes, g.edges), 2);
+  const out = SGM.simplifyBoardGraph(g.nodes, g.edges, { includeDeadEnds: false });
+  assert.strictEqual(out.info.removedEdges, 1);
+  assert.ok(!out.nodes.has('X'), 'X became a dead end and must be pruned');
+  assert.strictEqual(out.nodes.size, 16);
+  assert.strictEqual(out.edges.length, 24);
+  assert.strictEqual(out.info.crossingsRemaining, 0);
+  const keepX = SGM.simplifyBoardGraph(g.nodes, g.edges, { includeDeadEnds: true });
+  assert.ok(keepX.nodes.has('X'));
+  assert.strictEqual(keepX.nodes.get('X').neighbors.size, 1);
+  assert.deepStrictEqual(Array.from(keepX.nodes.get('X').neighbors), ['1,3']);
+});
+
+test('F1: small drawn square keeps its spurs when the loops alone are too small', async () => {
+  SGM.clearCaches();
+  const d = seedPresetRoads('tokyo-shimokitazawa');
+  const b = squareAround(d.location.lat, d.location.lon, 280);
+  const g = await withFetch(noNetwork(), () => SGM.generateStreetGoBoardInBounds(b, {}, null, {}));
+  assert.ok(g.stats.nodeCount >= 9 && g.stats.nodeCount <= 20, `${g.stats.nodeCount} points`);
+  assert.ok(isConnected(g.nodes));
+  SGM.clearCaches();
+});
+
+test('F2: a short board grows within the data at hand before asking the network', async () => {
+  SGM.clearCaches();
+  SGM.setPresetFetcher(localPresetFetcher);
+  const g = await withFetch(noNetwork(), () =>
+    SGM.generateStreetGoBoard('東京 下北沢', { targetNodes: 20, mergeRadiusMeters: 5 }, null, {})
+  );
+  assert.ok(g.stats.nodeCount >= 17, `${g.stats.nodeCount} points`);
+  SGM.clearCaches();
+});
+
+test('F6: midpoints are never placed closer than the merge radius', async () => {
+  SGM.clearCaches();
+  SGM.setPresetFetcher(localPresetFetcher);
+  const g = await withFetch(noNetwork(), () =>
+    SGM.generateStreetGoBoard('東京 渋谷駅', { targetNodes: 361, subdivideLongRoads: true, subdivideSpacingMeters: 30 }, null, {})
+  );
+  assert.ok(g.stats.nodeCount >= 9);
+  assert.ok(minNodeDistance(g.nodes) >= SGM.DEFAULT_MERGE_RADIUS_M, `min distance ${minNodeDistance(g.nodes)}`);
+  SGM.clearCaches();
+});
+
+test('F8: no edge of a drawn board leaves the square', async () => {
+  SGM.clearCaches();
+  const d = seedPresetRoads('tokyo-shibuya');
+  let boards = 0;
+  for (const side of [400, 600, 900]) {
+    for (const [dx, dy] of [[-0.003, 0], [0, 0], [0.003, 0.002]]) {
+      const b = squareAround(d.location.lat + dy, d.location.lon + dx, side);
+      let g;
+      try {
+        g = await withFetch(noNetwork(), () => SGM.generateStreetGoBoardInBounds(b, {}, null, {}));
+      } catch (err) {
+        if (err.kind === 'too-few') continue;
+        throw err;
+      }
+      boards++;
+      for (const e of g.edges) {
+        for (const [la, lo] of e.coords) {
+          assert.ok(la >= b.south - 1e-9 && la <= b.north + 1e-9 && lo >= b.west - 1e-9 && lo <= b.east + 1e-9, `edge ${e.u}-${e.v} leaves the square`);
+        }
+      }
+    }
+  }
+  assert.ok(boards >= 5);
+  SGM.clearCaches();
+});
+
+test('F13: junctions are merged at high latitudes too', () => {
+  for (const lat of [60, 80, 85]) {
+    const k = 111195 * Math.cos((lat * Math.PI) / 180);
+    for (let off = 0; off < 200; off += 7) {
+      const js = [0, 25].map((x, i) => ({ id: `h${i}`, lat, lon: 10 + (off + x) / k, deg: 3 }));
+      assert.strictEqual(SGM.clusterJunctions(js, 30).length, 1, `lat ${lat} offset ${off}`);
+    }
+  }
+});
+
+test('F7: far too many points stop before simplification', () => {
+  const g = meterGrid(45, 60, 35, 135); // 2025 junctions in the square
+  assert.throws(
+    () => SGM.buildRoadGraph(g.els, g.center[0], g.center[1], {
+      mergeRadiusMeters: 5,
+      bounds: { south: 34.99, north: 35.1, west: 134.99, east: 135.1 }
+    }),
+    // the early check reports "N点以上" (the final check after simplification says "N点")
+    (err) => err.kind === 'too-many' && /交点が多すぎます\(\d+点以上\)/.test(err.message)
+  );
+});
+
+test('F5/F10: preset JSON is versioned, must be roadMode "simple", and never needs Nominatim', async () => {
+  SGM.clearCaches();
+  const requested = [];
+  // 1. bundle without roadMode -> ignored, roads from Overpass, no Nominatim
+  SGM.setPresetFetcher(async (file) => {
+    requested.push(file);
+    const d = readPreset(file);
+    delete d.roadMode;
+    return d;
+  });
+  let urls = [];
+  await withFetch(async (url) => { urls.push(url); return jsonResponse(429, {}); },
+    () => rejectsKind(SGM.generateStreetGoBoard('東京 渋谷駅', { targetNodes: 81 }), 'busy'));
+  assert.ok(requested[0].endsWith(`.json?v=${SGM.ASSET_VERSION}`), requested[0]);
+  assert.strictEqual(urls.length, 1);
+  assert.ok(urls[0].includes('overpass'));
+  assert.ok(SGM.findCachedRoads(35.6593017, 139.7001474, 300) === null, 'old bundle must not be registered');
+
+  // 2. bundle cannot be loaded at all -> still no Nominatim
+  SGM.clearCaches();
+  SGM.setPresetFetcher(async () => { throw new Error('timeout'); });
+  urls = [];
+  await withFetch(async (url) => { urls.push(url); return jsonResponse(429, {}); },
+    () => rejectsKind(SGM.generateStreetGoBoard('札幌 大通公園', { targetNodes: 81 }), 'busy'));
+  assert.strictEqual(urls.length, 1);
+  assert.ok(!urls.some((u) => u.includes('nominatim')));
+
+  // 3. offline initial board with a broken bundle -> clear error, no request
+  SGM.clearCaches();
+  await withFetch(noNetwork(), () =>
+    rejectsKind(SGM.generateStreetGoBoard('京都 四条烏丸', {}, null, { allowNetwork: false }), 'offline'));
+  SGM.setPresetFetcher(localPresetFetcher);
+  SGM.clearCaches();
+});
+
+test('F5: the default preset loader adds the version query and a time limit', async () => {
+  SGM.clearCaches();
+  SGM.setPresetFetcher(null); // default loader
+  const seen = [];
+  await withFetch(async (url, opts) => {
+    seen.push({ url, hasSignal: !!(opts && opts.signal) });
+    return jsonResponse(200, readPreset('presets/kyoto-shijo-karasuma.json'));
+  }, () => SGM.generateStreetGoBoard('京都 四条烏丸', { targetNodes: 36 }, null, { allowNetwork: false }));
+  assert.strictEqual(seen.length, 1);
+  assert.strictEqual(seen[0].url, `presets/kyoto-shijo-karasuma.json?v=${SGM.ASSET_VERSION}`);
+  assert.ok(seen[0].hasSignal, 'the request carries an abort signal (15 s limit)');
+  SGM.setPresetFetcher(localPresetFetcher);
+  SGM.clearCaches();
+});
+
+test('F9: tunnels other than "no" are excluded, covered=arcade stays', () => {
+  const q = SGM.buildOverpassQuery(35, 135, 500, 'simple');
+  assert.ok(q.includes('(if: !is_tag("tunnel") || t["tunnel"] == "no")'));
+  assert.ok(q.includes('["covered"!="yes"]'));
+  assert.ok(!/covered"!~|arcade/.test(q));
 });
 
 // ---------------------------------------------------------------------------
