@@ -486,6 +486,67 @@
     return `横 ${fmt(widthM)} × 縦 ${fmt(heightM)}`;
   }
 
+  // ---------------------------------------------------------------------------
+  // Stone marker helpers (pure, screen pixels; used by app.js and the tests)
+
+  // Diameter of one point's marker: the zoom's base size, but no more than 80% of the
+  // screen distance to the nearest road-connected neighbour (so stones at both ends of a
+  // short road leave the road visible), and never below 70% of the base size.
+  // A point without a usable neighbour distance keeps the base size. Whole pixels.
+  function stoneDiameterPx(basePx, nearestNeighborPx) {
+    if (!(basePx > 0)) return 0;
+    if (!Number.isFinite(nearestNeighborPx) || nearestNeighborPx < 0) return Math.round(basePx);
+    const d = Math.min(basePx, Math.max(basePx * 0.7, nearestNeighborPx * 0.8));
+    return Math.round(d);
+  }
+
+  // Marker diameters for a whole board.
+  // points: Map id -> { x, y } (screen pixels at the current zoom; any common origin)
+  // neighbors: Map id -> iterable of neighbour ids (road connections)
+  // Returns Map id -> diameter (px) for every id in `points`.
+  function nodeStoneDiameters(points, neighbors, basePx) {
+    const out = new Map();
+    for (const [id, p] of points) {
+      let nearest = Infinity;
+      const nbs = neighbors && neighbors.get(id);
+      if (nbs && p) {
+        for (const nb of nbs) {
+          if (nb === id) continue;
+          const q = points.get(nb);
+          if (!q) continue;
+          const dist = Math.hypot(q.x - p.x, q.y - p.y);
+          if (Number.isFinite(dist) && dist < nearest) nearest = dist;
+        }
+      }
+      out.set(id, stoneDiameterPx(basePx, nearest));
+    }
+    return out;
+  }
+
+  // The point a click / tap at `point` ({ x, y }, screen pixels) means: among the
+  // candidates ({ id, x, y, diameter }) whose circle contains the point, the one whose
+  // centre is nearest. Equal distances keep `fallbackId` (the marker that got the event),
+  // else the earlier candidate. No candidate contains the point (or no usable point):
+  // `fallbackId`.
+  function pickNodeAtPoint(point, candidates, fallbackId) {
+    if (!point || !Number.isFinite(point.x) || !Number.isFinite(point.y)) return fallbackId;
+    let best = fallbackId;
+    let bestDist = Infinity;
+    let bestIsFallback = false;
+    for (const c of candidates) {
+      if (!c || !(c.diameter > 0)) continue;
+      const dist = Math.hypot(c.x - point.x, c.y - point.y);
+      if (!(dist <= c.diameter / 2)) continue;
+      const isFallback = c.id === fallbackId;
+      if (dist < bestDist || (dist === bestDist && isFallback && !bestIsFallback)) {
+        best = c.id;
+        bestDist = dist;
+        bestIsFallback = isFallback;
+      }
+    }
+    return best;
+  }
+
   function polylineLength(coords) {
     let total = 0;
     for (let i = 1; i < coords.length; i++) {
@@ -1929,6 +1990,9 @@ out skel qt;
     normalizeDrawnBounds,
     findCachedRoadsForRect,
     formatRectSize,
+    stoneDiameterPx,
+    nodeStoneDiameters,
+    pickNodeAtPoint,
     MIN_DRAW_SIDE_PX,
     MAX_DRAW_SIDE_M,
     MAX_DRAW_ASPECT,

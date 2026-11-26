@@ -3,8 +3,8 @@
   font-style: normal;
   font-display: swap;
   font-weight: 300 600;
-  src: url("vendor/fonts/urbanist/urbanist-latin-wght-normal.woff2?v=11") format("woff2-variations"),
-       url("vendor/fonts/urbanist/urbanist-latin-wght-normal.woff2?v=11") format("woff2");
+  src: url("vendor/fonts/urbanist/urbanist-latin-wght-normal.woff2?v=12") format("woff2-variations"),
+       url("vendor/fonts/urbanist/urbanist-latin-wght-normal.woff2?v=12") format("woff2");
   unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
 }
 
@@ -1397,47 +1397,59 @@ input[type="checkbox"]:checked::after {
   position: relative;
 }
 
-/* Empty intersection: small white dot with thin ink outline (border scales with the dot) */
+/* Empty intersection: small white dot with thin ink outline (border scales with the dot).
+   border-box: zoom 13 (13 px) -> 13 - 2 * 4 = 5 px inside, x 0.22 = about 1 px of white;
+   zoom 16 (27 px) -> dot about 27 * 0.22 = 6 px across.
+   A marker made smaller than the base size (a close road neighbour, see app.js) gets
+   --dot-scale / --dot-border rescaled by base / size, so its dot looks the same. */
 .go-node.empty {
   background: #fff;
   border: 4px solid var(--ink);
-  transform: scale(0.26);
+  border-width: var(--dot-border, 4px);
+  transform: scale(var(--dot-scale, 0.22));
 }
 
 /* Only points that can take a stone grow on hover / focus. The trigger is the outer
    wrapper (the marker that receives the click), so the preview appears over exactly the
-   area that places a stone, not only over the scaled-down inner dot. */
-.go-node-wrapper:hover .go-node.empty.preview-B,
-.go-node-wrapper:hover .go-node.empty.preview-W,
-.go-node-wrapper:focus-visible .go-node.empty.preview-B,
-.go-node-wrapper:focus-visible .go-node.empty.preview-W {
+   area that places a stone, not only over the scaled-down inner dot. Never while an area
+   is being drawn (#map.draw-mode): a click there draws, it does not place a stone. */
+#map:not(.draw-mode) .go-node-wrapper:hover .go-node.empty.preview-B,
+#map:not(.draw-mode) .go-node-wrapper:hover .go-node.empty.preview-W,
+#map:not(.draw-mode) .go-node-wrapper:focus-visible .go-node.empty.preview-B,
+#map:not(.draw-mode) .go-node-wrapper:focus-visible .go-node.empty.preview-W {
   transform: scale(1.02);
   border-width: 1.5px;
 }
 
-.go-node-wrapper:hover .go-node.empty.preview-B,
-.go-node-wrapper:focus-visible .go-node.empty.preview-B {
+#map:not(.draw-mode) .go-node-wrapper:hover .go-node.empty.preview-B,
+#map:not(.draw-mode) .go-node-wrapper:focus-visible .go-node.empty.preview-B {
   background: rgba(31, 31, 31, 0.6);
 }
 
-.go-node-wrapper:hover .go-node.empty.preview-W,
-.go-node-wrapper:focus-visible .go-node.empty.preview-W {
+#map:not(.draw-mode) .go-node-wrapper:hover .go-node.empty.preview-W,
+#map:not(.draw-mode) .go-node-wrapper:focus-visible .go-node.empty.preview-W {
   background: rgba(255, 255, 255, 0.7);
 }
 
 .go-node.stone-B {
   background: var(--ink);
   border: 1.5px solid var(--ink);
+  box-shadow: 0 0 0 1.5px #fff;
 }
 
 .go-node.stone-W {
   background: #fff;
-  border: 1.5px solid var(--ink);
+  border: 2px solid var(--ink);
+  box-shadow: 0 0 0 1.5px #fff;
 }
 
-/* Dark map: black stones get a light rim */
+/* Dark map: black stones are solid black inside a wide light rim (and an ink ring that
+   keeps the rim apart from the light roads), so they read as filled discs, unlike the
+   white-filled white stones and the small empty dots */
 #map.map-style-dark .go-node.stone-B {
-  border-color: #f7f7f6;
+  background: #000;
+  border: 2.5px solid #f7f7f6;
+  box-shadow: 0 0 0 1.5px var(--ink);
 }
 
 .go-node.last-move::after {
@@ -1569,13 +1581,21 @@ input[type="checkbox"]:checked::after {
 }
 
 @media (forced-colors: active) {
-  #map .go-node.stone-B {
+  /* The dark-map selector too: its black-stone rule is more specific than #map .go-node */
+  #map .go-node.stone-B,
+  #map.map-style-dark .go-node.stone-B {
     background: CanvasText;
     border-color: CanvasText;
   }
   #map .go-node.stone-W {
     background: Canvas;
     border: 2px solid CanvasText;
+  }
+  /* Liberties: the system highlight colour, so they differ from both stones
+     (white = Canvas inside CanvasText, black = CanvasText) */
+  #map .go-node.liberty-highlight {
+    background: Highlight !important;
+    border: 2px solid CanvasText !important;
   }
   input[type="checkbox"],
   input[type="range"] {

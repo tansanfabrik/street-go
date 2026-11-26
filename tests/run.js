@@ -1529,6 +1529,135 @@ test('R16: preset JSON requests carry ASSET_VERSION (its own generation)', async
 });
 
 // ---------------------------------------------------------------------------
+// Stone markers: per-point diameter and the point a click means
+
+// Web Mercator pixels at zoom z (what Leaflet's map.project gives, unrounded)
+function projectPx(lat, lon, z) {
+  const scale = 256 * Math.pow(2, z);
+  const s = Math.sin((lat * Math.PI) / 180);
+  return {
+    x: ((lon + 180) / 360) * scale,
+    y: (0.5 - Math.log((1 + s) / (1 - s)) / (4 * Math.PI)) * scale
+  };
+}
+
+function boardScreen(nodes, z) {
+  const points = new Map();
+  const neighbors = new Map();
+  for (const [id, n] of nodes) {
+    points.set(id, projectPx(n.lat, n.lon, z));
+    neighbors.set(id, n.neighbors);
+  }
+  return { points, neighbors };
+}
+
+test('stones: diameter = min(base, max(0.7 base, 0.8 x nearest road neighbour)), whole px', () => {
+  assert.strictEqual(SGM.stoneDiameterPx(17, 100), 17);
+  assert.strictEqual(SGM.stoneDiameterPx(17, 7.8), 12); // floor 11.9
+  assert.strictEqual(SGM.stoneDiameterPx(17, 18), 14); // 14.4
+  assert.strictEqual(SGM.stoneDiameterPx(17, 21.25), 17); // exactly the base
+  assert.strictEqual(SGM.stoneDiameterPx(13, 0), 9); // same spot: floor 9.1
+  assert.strictEqual(SGM.stoneDiameterPx(22, Infinity), 22); // no neighbour
+  assert.strictEqual(SGM.stoneDiameterPx(22, NaN), 22);
+  assert.strictEqual(SGM.stoneDiameterPx(0, 10), 0);
+});
+
+test('stones: per-point diameters use the nearest road-connected neighbour only', () => {
+  const points = new Map([
+    ['a', { x: 0, y: 0 }],
+    ['b', { x: 10, y: 0 }],
+    ['c', { x: 100, y: 0 }],
+    ['d', { x: 5, y: 1 }], // close to a and b, but no road to them
+    ['e', { x: 300, y: 0 }]
+  ]);
+  const neighbors = new Map([
+    ['a', new Set(['b'])],
+    ['b', new Set(['a', 'c'])],
+    ['c', new Set(['b', 'missing'])],
+    ['d', new Set()],
+    ['e', new Set(['e'])] // a self loop is not a neighbour
+  ]);
+  const sizes = SGM.nodeStoneDiameters(points, neighbors, 22);
+  assert.deepStrictEqual(Array.from(sizes), [['a', 15], ['b', 15], ['c', 22], ['d', 22], ['e', 22]]);
+  // Twice the scale (one zoom level in): the distances double
+  const points2 = new Map(Array.from(points, ([id, p]) => [id, { x: p.x * 2, y: p.y * 2 }]));
+  assert.strictEqual(SGM.nodeStoneDiameters(points2, neighbors, 22).get('a'), 16);
+  assert.strictEqual(SGM.nodeStoneDiameters(new Map(), neighbors, 22).size, 0);
+  assert.strictEqual(SGM.nodeStoneDiameters(points, null, 22).get('a'), 22);
+});
+
+test('stones: click picks the nearest point whose circle holds the press, else the marker hit', () => {
+  // Two points 7.8 px apart (as on the Kyoto board at zoom 14), both 12 px
+  const cands = [{ id: 'A', x: 0, y: 0, diameter: 12 }, { id: 'B', x: 7.8, y: 0, diameter: 12 }];
+  // B's centre, though A's marker (on top) got the event
+  assert.strictEqual(SGM.pickNodeAtPoint({ x: 7.8, y: 0 }, cands, 'A'), 'B');
+  assert.strictEqual(SGM.pickNodeAtPoint({ x: 2, y: 1 }, cands, 'B'), 'A');
+  // Exactly half way: the marker that got the event
+  assert.strictEqual(SGM.pickNodeAtPoint({ x: 3.9, y: 0 }, cands, 'A'), 'A');
+  assert.strictEqual(SGM.pickNodeAtPoint({ x: 3.9, y: 0 }, cands, 'B'), 'B');
+  // Outside every circle (e.g. a marker's square corner): the marker that got the event
+  assert.strictEqual(SGM.pickNodeAtPoint({ x: -5, y: -5 }, cands, 'A'), 'A');
+  assert.strictEqual(SGM.pickNodeAtPoint({ x: 1, y: 0 }, [], 'B'), 'B');
+  assert.strictEqual(SGM.pickNodeAtPoint({ x: NaN, y: 0 }, cands, 'B'), 'B');
+  assert.strictEqual(SGM.pickNodeAtPoint(null, cands, 'B'), 'B');
+  // A point with no size never takes a click
+  assert.strictEqual(SGM.pickNodeAtPoint({ x: 0, y: 0 }, [{ id: 'A', x: 0, y: 0, diameter: 0 }, cands[1]], 'B'), 'B');
+  // The edge of a circle still counts
+  assert.strictEqual(SGM.pickNodeAtPoint({ x: 6, y: 0 }, [{ id: 'A', x: 0, y: 0, diameter: 12 }], 'Z'), 'A');
+  assert.strictEqual(SGM.pickNodeAtPoint({ x: 6.01, y: 0 }, [{ id: 'A', x: 0, y: 0, diameter: 12 }], 'Z'), 'Z');
+});
+
+test('stones: Kyoto 81 points, zooms 13-18 and fractional: sizes in range, centre clicks hit their own point', async () => {
+  SGM.clearCaches();
+  const board = await withFetch(noNetwork(), () =>
+    SGM.generateStreetGoBoard('京都 四条烏丸', { targetNodes: 81 }, null, { allowNetwork: false }));
+  const BASE = [[13, 13], [14, 17], [15, 22], [16, 27], [17, 32], [18, 36]];
+  const baseAt = (z) => {
+    if (z <= 13) return 13;
+    if (z >= 18) return 36;
+    for (let i = 1; i < BASE.length; i++) {
+      if (z <= BASE[i][0]) {
+        const [z0, p0] = BASE[i - 1];
+        const [z1, p1] = BASE[i];
+        return Math.round(p0 + ((z - z0) / (z1 - z0)) * (p1 - p0));
+      }
+    }
+    return 36;
+  };
+  let shrunk = 0;
+  for (const z of [13, 14, 14.25, 15.5, 16, 17.75, 18]) {
+    const base = baseAt(z);
+    const { points, neighbors } = boardScreen(board.nodes, z);
+    const sizes = SGM.nodeStoneDiameters(points, neighbors, base);
+    assert.strictEqual(sizes.size, board.nodes.size);
+    for (const [id, px] of sizes) {
+      const p = points.get(id);
+      let nearest = Infinity;
+      for (const nb of board.nodes.get(id).neighbors) {
+        const q = points.get(nb);
+        nearest = Math.min(nearest, Math.hypot(q.x - p.x, q.y - p.y));
+      }
+      assert.ok(px <= base && px >= Math.round(base * 0.7), `z${z} ${id}: ${px} (base ${base})`);
+      assert.ok(px <= Math.max(Math.round(base * 0.7), nearest * 0.8 + 0.5), `z${z} ${id}: ${px} near ${nearest}`);
+      if (px < base) shrunk++;
+    }
+    // Clicking exactly at a point's drawn (rounded) centre plays there, whichever
+    // overlapping marker got the event
+    const cands = Array.from(points, ([id, p]) => ({ id, x: Math.round(p.x), y: Math.round(p.y), diameter: sizes.get(id) }));
+    for (const c of cands) {
+      const sameSpot = cands.some((o) => o.id !== c.id && o.x === c.x && o.y === c.y);
+      if (sameSpot) continue;
+      const overlapping = cands.filter((o) => Math.hypot(o.x - c.x, o.y - c.y) <= o.diameter / 2);
+      for (const hit of overlapping) {
+        assert.strictEqual(SGM.pickNodeAtPoint({ x: c.x, y: c.y }, cands, hit.id), c.id, `z${z}: ${c.id} via ${hit.id}`);
+      }
+    }
+  }
+  assert.ok(shrunk > 0, 'no point was made smaller on the Kyoto board');
+  SGM.clearCaches();
+});
+
+// ---------------------------------------------------------------------------
 (async () => {
   let passed = 0;
   let failed = 0;

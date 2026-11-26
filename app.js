@@ -134,7 +134,7 @@
 
   let currentBoardData = null;
   let engine = null;
-  let nodeMarkers = new Map(); // id -> { marker, el }
+  let nodeMarkers = new Map(); // id -> { marker, el, wrapper, tabIndex, label, size (px), dotScale, dotBorder }
   let edgePolylines = []; // { u, v, polyline }
   let showTerritory = false;
   let highlightedLiberties = new Set();
@@ -225,8 +225,8 @@
     targetNodesBadge.textContent = `${getTargetNodes()} 交点`;
   }
 
-  // Marker size per zoom level (13 -> 11 px ... 18 -> 30 px), interpolated for fractional zoom
-  const NODE_PX_BY_ZOOM = [[13, 11], [14, 14], [15, 18], [16, 22], [17, 26], [18, 30]];
+  // Marker size per zoom level (13 -> 13 px ... 18 -> 36 px), interpolated for fractional zoom
+  const NODE_PX_BY_ZOOM = [[13, 13], [14, 17], [15, 22], [16, 27], [17, 32], [18, 36]];
 
   function getNodePixelSize() {
     const z = map.getZoom();
@@ -244,25 +244,93 @@
     return last[1];
   }
 
-  function updateMarkerSizes() {
-    const px = getNodePixelSize();
-    for (const { marker } of nodeMarkers.values()) {
-      const icon = marker.getIcon();
+  // Pure marker helpers from map-graph.js; plain stand-ins for an older cached copy
+  // (every point at the base size, a click stays on the marker that got it)
+  const nodeStoneDiameters = typeof window.StreetGoMap.nodeStoneDiameters === 'function'
+    ? window.StreetGoMap.nodeStoneDiameters
+    : (points, neighbors, basePx) => new Map(Array.from(points.keys(), (id) => [id, basePx]));
+  const pickNodeAtPoint = typeof window.StreetGoMap.pickNodeAtPoint === 'function'
+    ? window.StreetGoMap.pickNodeAtPoint
+    : (point, candidates, fallbackId) => fallbackId;
+
+  // Marker diameter of every point at the current zoom (fractional zoom included): the
+  // base size, smaller where a road-connected neighbour is close on screen
+  function computeNodeSizes() {
+    const sizes = new Map();
+    if (!currentBoardData) return sizes;
+    const zoom = map.getZoom();
+    const points = new Map();
+    const neighbors = new Map();
+    for (const [id, node] of currentBoardData.nodes) {
+      points.set(id, map.project([node.lat, node.lon], zoom)); // unrounded pixels
+      neighbors.set(id, node.neighbors);
+    }
+    return nodeStoneDiameters(points, neighbors, getNodePixelSize());
+  }
+
+  // Resize one marker to `px` (base: the zoom's base size). The DOM is only written when a
+  // value actually changes.
+  function applyMarkerSize(entry, px, base) {
+    if (!(px > 0)) return;
+    if (entry.size !== px) {
+      entry.size = px;
+      const icon = entry.marker.getIcon();
       if (icon && icon.options) {
         icon.options.iconSize = [px, px];
         icon.options.iconAnchor = [px / 2, px / 2];
-        const el = marker.getElement();
-        if (el) {
-          el.style.width = `${px}px`;
-          el.style.height = `${px}px`;
-          el.style.marginLeft = `${-px / 2}px`;
-          el.style.marginTop = `${-px / 2}px`;
-        }
       }
+      const el = entry.marker.getElement();
+      if (el) {
+        el.style.width = `${px}px`;
+        el.style.height = `${px}px`;
+        el.style.marginLeft = `${-px / 2}px`;
+        el.style.marginTop = `${-px / 2}px`;
+      }
+    }
+    // An empty point's dot looks the same as at the base size, however small the marker
+    // (the stone) is made: the CSS scale and ring width are rescaled by base / px. The ring
+    // is whole pixels (Chrome floors a fractional border width, other browsers do not).
+    const k = base > 0 ? base / px : 1;
+    const dotScale = (0.22 * k).toFixed(4);
+    const dotBorder = `${Math.max(1, Math.round(4 / k))}px`;
+    if (entry.dotScale !== dotScale || entry.dotBorder !== dotBorder) {
+      entry.dotScale = dotScale;
+      entry.dotBorder = dotBorder;
+      entry.wrapper.style.setProperty('--dot-scale', dotScale);
+      entry.wrapper.style.setProperty('--dot-border', dotBorder);
+    }
+  }
+
+  function updateMarkerSizes() {
+    if (nodeMarkers.size === 0) return;
+    const sizes = computeNodeSizes();
+    const base = getNodePixelSize();
+    for (const [id, entry] of nodeMarkers) {
+      const px = sizes.get(id);
+      applyMarkerSize(entry, px > 0 ? px : base, base);
     }
   }
 
   map.on('zoomend', updateMarkerSizes);
+
+  // The point a pointer click / tap on marker `id` is meant for: the point whose circle
+  // contains the press and whose centre is nearest to it (close points overlap on screen,
+  // and the marker on top is not always the one aimed at). A click without a pointer
+  // position (detail 0: keyboard or assistive technology) stays on the marker itself.
+  function nodeAtPointer(id, ev) {
+    if (!ev || ev.detail === 0 || !currentBoardData) return id;
+    if (!Number.isFinite(ev.clientX) || !Number.isFinite(ev.clientY)) return id;
+    const point = map.mouseEventToContainerPoint(ev);
+    const candidates = [];
+    for (const [nid, entry] of nodeMarkers) {
+      const node = currentBoardData.nodes.get(nid);
+      if (!node) continue;
+      // The same (rounded) position Leaflet draws the marker at
+      const c = map.latLngToContainerPoint([node.lat, node.lon]);
+      candidates.push({ id: nid, x: c.x, y: c.y, diameter: entry.size });
+    }
+    return pickNodeAtPoint(point, candidates, id);
+  }
 
   function edgeKey(u, v) {
     return u < v ? `${u}|${v}` : `${v}|${u}`;
@@ -273,7 +341,7 @@
     return {
       color: isDark ? '#f7f7f6' : '#1f1f1f',
       weight: 2.2,
-      opacity: isDark ? 0.6 : 0.55
+      opacity: isDark ? 0.6 : 0.7
     };
   }
 
@@ -397,9 +465,12 @@
     nodeMarkers.clear();
     if (!currentBoardData) return;
 
-    const px = getNodePixelSize();
+    const base = getNodePixelSize();
+    const sizes = computeNodeSizes();
 
     for (const [id, node] of currentBoardData.nodes) {
+      const size = sizes.get(id);
+      const px = size > 0 ? size : base;
       const icon = L.divIcon({
         className: 'go-node-wrapper',
         html: `<div class="go-node empty" data-id="${id}"></div>`,
@@ -417,9 +488,12 @@
       // Keyboard access: empty points are tabbable (set in renderGameState), Enter/Space plays
       wrapper.setAttribute('role', 'button');
       wrapper.tabIndex = -1;
-      nodeMarkers.set(id, { marker, el, wrapper, tabIndex: -1, label: '' });
+      const entry = { marker, el, wrapper, tabIndex: -1, label: '', size: px, dotScale: '', dotBorder: '' };
+      nodeMarkers.set(id, entry);
+      applyMarkerSize(entry, px, base); // the empty-point dot of a smaller marker
 
-      marker.on('click', () => handleNodeClick(id));
+      // Pointer clicks / taps go to the nearest point under the press (see nodeAtPointer)
+      marker.on('click', (e) => handleNodeClick(nodeAtPointer(id, e && e.originalEvent)));
       marker.on('mouseover', () => handleNodeHover(id));
       marker.on('mouseout', () => handleNodeLeave());
       wrapper.addEventListener('keydown', (e) => {
