@@ -3,8 +3,8 @@
   font-style: normal;
   font-display: swap;
   font-weight: 300 600;
-  src: url("vendor/fonts/urbanist/urbanist-latin-wght-normal.woff2?v=9") format("woff2-variations"),
-       url("vendor/fonts/urbanist/urbanist-latin-wght-normal.woff2?v=9") format("woff2");
+  src: url("vendor/fonts/urbanist/urbanist-latin-wght-normal.woff2?v=11") format("woff2-variations"),
+       url("vendor/fonts/urbanist/urbanist-latin-wght-normal.woff2?v=11") format("woff2");
   unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
 }
 
@@ -515,6 +515,16 @@ input[type="checkbox"]:checked::after {
   align-items: center;
   justify-content: center;
   gap: 8px;
+}
+
+/* Small landscape frame in front of the draw button label (a rectangle) */
+.draw-rect-icon {
+  box-sizing: border-box;
+  flex-shrink: 0;
+  width: 16px;
+  height: 11px;
+  border: 1.5px solid currentColor;
+  border-radius: 3px;
 }
 
 /* Disabled wins over every variant above (keep this block last among the .btn rules) */
@@ -1130,7 +1140,7 @@ input[type="checkbox"]:checked::after {
   cursor: crosshair !important;
 }
 
-/* Let pointer events (touch / pen) drive the square instead of page scroll / pinch */
+/* Let pointer events (touch / pen) drive the area drawing instead of page scroll / pinch */
 #map.draw-mode,
 #map.draw-mode * {
   touch-action: none !important;
@@ -1259,6 +1269,54 @@ input[type="checkbox"]:checked::after {
 }
 
 .draw-banner .btn {
+  flex-shrink: 0;
+}
+
+/* "(Shift で正方形)": only where a mouse / trackpad is the main pointer */
+.draw-shift-hint {
+  display: none;
+  margin-left: 4px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+@media (pointer: fine) {
+  .draw-shift-hint {
+    display: inline;
+  }
+}
+
+/* Short instruction on narrow screens (same width as the stacked layout) */
+.draw-text-short {
+  display: none;
+}
+
+@media (max-width: 780px) {
+  .draw-text-long {
+    display: none;
+  }
+  .draw-text-short {
+    display: inline;
+  }
+}
+
+/* Why a finished drag was refused (live region; takes no room while empty) */
+.draw-error {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.draw-error:empty {
+  margin-left: -10px; /* cancels the banner's column gap */
+}
+
+.draw-error:not(:empty)::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--alert);
   flex-shrink: 0;
 }
 

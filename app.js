@@ -64,6 +64,7 @@
   const drawBanner = document.getElementById('draw-banner');
   const drawSizeLabel = document.getElementById('draw-size-label');
   const cancelDrawBtn = document.getElementById('cancel-draw-btn');
+  const drawErrorEl = document.getElementById('draw-error');
   const presetChips = document.querySelectorAll('.chip[data-place]');
 
   const sizeSelect = document.getElementById('size-select');
@@ -152,15 +153,17 @@
   let endedWith = null; // { human: 'B' | 'W' | null }
   let pendingFit = false; // fitBounds postponed until the map has a usable size
 
-  // Square drawing state
+  // Area drawing state (a rectangle; Shift + mouse drag makes it a square)
   let isDrawMode = false;
   let isDraggingSquare = false;
-  let drawStartPt = null;
+  let drawStartLatLng = null; // start of the drag as a map position (survives resize / zoom)
+  let drawLastClient = null; // last pointer position on the page { clientX, clientY }
+  let drawPointerType = '';
+  let drawShift = false; // Shift held (squares mouse drags)
   let drawPreviewRect = null;
-  let lastSquareBounds = null;
   let drawPointerId = null;
   let savedMapInteractions = null;
-  let suppressClickUntil = 0; // ignore the click that follows a square drag
+  let suppressClickUntil = 0; // ignore the click that follows an area drag
 
   // Helpers
   function showToast(msg, duration = 2200) {
@@ -664,7 +667,9 @@
 
   // Interactions
   function handleNodeHover(id) {
-    if (!engine) return;
+    // No hover / focus info while drawing an area (a touch drag starting on a point
+    // would otherwise light it up)
+    if (!engine || isDrawMode) return;
     const node = currentBoardData.nodes.get(id);
     const stone = engine.board.get(id);
     highlightedLiberties.clear();
@@ -834,10 +839,20 @@
     }, CPU_DELAY_MS);
   }
 
-  // Small map areas (phones) get a thin margin around the board so it can fill the width
+  // Small map areas (phones) get a thin margin around the board so it can fill the width.
+  // Stacked layout (same width as the CSS): notices and the zoom buttons sit at the top of
+  // the map and the attribution at the bottom, so the board keeps clear of them there
+  // (at least 72 px, or below the notice when it is taller). Returns [topLeft, bottomRight].
+  const STACKED_MEDIA = '(max-width: 780px)';
   function boardFitPadding() {
     const size = map.getSize();
-    return Math.min(size.x, size.y) < 420 ? [16, 16] : [44, 44];
+    const p = Math.min(size.x, size.y) < 420 ? 16 : 44;
+    if (!(window.matchMedia && window.matchMedia(STACKED_MEDIA).matches)) return [[p, p], [p, p]];
+    let top = Math.max(p, 72);
+    if (!toastEl.classList.contains('hidden')) {
+      top = Math.max(top, toastEl.offsetTop + toastEl.offsetHeight + 10);
+    }
+    return [[p, top], [p, Math.max(p, 44)]];
   }
 
   function boardLatLngBounds() {
@@ -862,14 +877,14 @@
     }
     map.invalidateSize({ animate: false });
     const size = map.getSize();
-    const padding = boardFitPadding();
-    if (!(size.x - 2 * padding[0] > 0 && size.y - 2 * padding[1] > 0)) {
+    const [topLeft, bottomRight] = boardFitPadding();
+    if (!(size.x - topLeft[0] - bottomRight[0] > 0 && size.y - topLeft[1] - bottomRight[1] > 0)) {
       pendingFit = true;
       return;
     }
     pendingFit = false;
     map.stop();
-    map.fitBounds(bounds, { padding, maxZoom: 18, animate: false });
+    map.fitBounds(bounds, { paddingTopLeft: topLeft, paddingBottomRight: bottomRight, maxZoom: 18, animate: false });
   }
 
   // Keep Leaflet's idea of the map size equal to the real one: the result box, error box,
@@ -915,11 +930,13 @@
     renderGameState();
     statusBar.classList.add('hidden');
 
+    // The notice first: on narrow screens it sits at the top of the map and the fit
+    // keeps the board below it
+    showToast(`${label}の盤面（${nodeCount}交点）を生成しました`);
+
     // Close the panel first, then re-measure the map, then fit (a stale size leaves the board small)
     closeSetupIfCompact();
     fitBoard();
-
-    showToast(`${label}の盤面（${nodeCount}交点）を生成しました`);
   }
 
   function getBoardOptions() {
@@ -985,9 +1002,9 @@
     );
   }
 
-  // Board Generation by Drawn Square Bounds
+  // Board Generation by Drawn Area Bounds
   function generateBoardInBounds(bounds) {
-    return runGeneration('選択した正方形の道路網を取得中...', '指定範囲', (signal, onProgress) =>
+    return runGeneration('選択した範囲の道路網を取得中...', '指定範囲', (signal, onProgress) =>
       window.StreetGoMap.generateStreetGoBoardInBounds(bounds, getBoardOptions(), onProgress, { signal })
     );
   }
@@ -996,13 +1013,15 @@
     if (generateController) generateController.abort();
   });
 
-  // Square Drawing Mode
+  // Area Drawing Mode
   function enterDrawMode() {
     if (isGenerating) return;
     isDrawMode = true;
     isDraggingSquare = false;
-    drawStartPt = null;
-    lastSquareBounds = null;
+    drawStartLatLng = null;
+    drawLastClient = null;
+    drawPointerType = '';
+    drawShift = false;
     drawPointerId = null;
     // Disable map gestures while drawing; restore the previous state on exit
     savedMapInteractions = {};
@@ -1017,9 +1036,17 @@
     drawSquareBtn.classList.add('active');
     drawBanner.classList.remove('hidden');
     drawSizeLabel.textContent = '';
-    hoverHud.classList.add('hidden');
+    setDrawError('');
+    // No hover / focus info while drawing: drop what is shown now
+    handleNodeLeave();
     // A notice left over from the last action would cover the banner on small screens
     toastEl.classList.add('hidden');
+  }
+
+  // The banner's live region: written only when a finished drag is refused (and the
+  // draw mode goes on), emptied on the next drag and when the draw mode ends
+  function setDrawError(msg) {
+    if (drawErrorEl && drawErrorEl.textContent !== msg) drawErrorEl.textContent = msg;
   }
 
   function releaseDrawPointer() {
@@ -1033,16 +1060,22 @@
     }
   }
 
-  function exitDrawMode() {
-    isDrawMode = false;
+  // Drop the current drag (if any); draw mode itself stays as it is
+  function resetDrawDrag() {
     isDraggingSquare = false;
-    drawStartPt = null;
-    lastSquareBounds = null;
+    drawStartLatLng = null;
+    drawLastClient = null;
+    drawPointerType = '';
     releaseDrawPointer();
     if (drawPreviewRect) {
       map.removeLayer(drawPreviewRect);
       drawPreviewRect = null;
     }
+  }
+
+  function exitDrawMode() {
+    isDrawMode = false;
+    resetDrawDrag();
     if (savedMapInteractions) {
       for (const [name, wasEnabled] of Object.entries(savedMapInteractions)) {
         if (wasEnabled && map[name]) map[name].enable();
@@ -1053,30 +1086,47 @@
     drawSquareBtn.classList.remove('active');
     drawBanner.classList.add('hidden');
     drawSizeLabel.textContent = '';
+    setDrawError('');
   }
 
-  function computeSquareBounds(startPt, currPt) {
-    const dx = currPt.x - startPt.x;
-    const dy = currPt.y - startPt.y;
-    const side = Math.max(Math.abs(dx), Math.abs(dy));
-    const endPt = L.point(
-      startPt.x + (dx >= 0 ? 1 : -1) * side,
-      startPt.y + (dy >= 0 ? 1 : -1) * side
-    );
-    const p1 = map.containerPointToLatLng(startPt);
-    const p2 = map.containerPointToLatLng(endPt);
+  // The current drag as map bounds. The start is kept as a map position and the pointer
+  // as a page position, and both are turned into map pixels now: after a resize or a zoom
+  // during the drag, the preview and the final area still agree. `square` (Shift + mouse)
+  // stretches the shorter side to the longer one on screen, as the square-only drawing did.
+  function computeDrawBounds(client, square) {
+    const SGM = window.StreetGoMap;
+    // Unrounded (latLngToContainerPoint rounds to whole pixels); the start corner itself
+    // is the kept map position
+    const startPt = map.layerPointToContainerPoint(map.project(drawStartLatLng).subtract(map.getPixelOrigin()));
+    const currPt = map.mouseEventToContainerPoint(client);
+    const r = SGM.dragRectPx(startPt, currPt, square);
+    const p1 = drawStartLatLng;
+    const p2 = map.containerPointToLatLng(L.point(r.end.x, r.end.y));
+    const bounds = {
+      south: Math.min(p1.lat, p2.lat),
+      north: Math.max(p1.lat, p2.lat),
+      west: Math.min(p1.lng, p2.lng),
+      east: Math.max(p1.lng, p2.lng)
+    };
+    const { widthM, heightM } = SGM.rectSizeMeters(bounds);
     return {
-      sidePx: side,
-      bounds: {
-        south: Math.min(p1.lat, p2.lat),
-        north: Math.max(p1.lat, p2.lat),
-        west: Math.min(p1.lng, p2.lng),
-        east: Math.max(p1.lng, p2.lng)
-      }
+      bounds,
+      widthM,
+      heightM,
+      check: SGM.checkDrawnRect({ widthM, heightM, widthPx: r.widthPx, heightPx: r.heightPx })
     };
   }
 
-  // Square drawing with Pointer Events (mouse / touch / pen). Listeners run in the capture
+  // Shift squares only mouse drags (touch and pen have no Shift key)
+  function drawSquareLock() {
+    return drawPointerType === 'mouse' && drawShift;
+  }
+
+  function clientPos(e) {
+    return { clientX: e.clientX, clientY: e.clientY };
+  }
+
+  // Area drawing with Pointer Events (mouse / touch / pen). Listeners run in the capture
   // phase on the map container so Leaflet and the node markers never see the gesture.
   mapEl.addEventListener('pointerdown', (e) => {
     if (!isDrawMode) return;
@@ -1085,6 +1135,7 @@
     if (e.pointerType === 'mouse' && e.button !== 0) return;
     e.preventDefault();
     e.stopPropagation();
+    resetDrawDrag();
     drawPointerId = e.pointerId;
     try {
       mapEl.setPointerCapture(e.pointerId);
@@ -1092,52 +1143,60 @@
       // capture is best-effort
     }
     isDraggingSquare = true;
-    drawStartPt = map.mouseEventToContainerPoint(e);
-    lastSquareBounds = null;
-    if (drawPreviewRect) {
-      map.removeLayer(drawPreviewRect);
-      drawPreviewRect = null;
-    }
+    drawPointerType = e.pointerType || 'mouse';
+    drawShift = !!e.shiftKey;
+    drawStartLatLng = map.containerPointToLatLng(map.mouseEventToContainerPoint(e));
+    drawLastClient = clientPos(e);
+    drawSizeLabel.textContent = '';
+    setDrawError('');
   }, true);
 
   mapEl.addEventListener('pointermove', (e) => {
-    if (!isDrawMode || !isDraggingSquare || !drawStartPt || e.pointerId !== drawPointerId) return;
+    if (!isDrawMode || !isDraggingSquare || !drawStartLatLng || e.pointerId !== drawPointerId) return;
     e.preventDefault();
     e.stopPropagation();
-    updateSquarePreview(map.mouseEventToContainerPoint(e));
+    drawShift = !!e.shiftKey;
+    updateDrawPreview(clientPos(e));
   }, true);
 
   mapEl.addEventListener('pointerup', (e) => {
-    if (!isDrawMode || !isDraggingSquare || e.pointerId !== drawPointerId) return;
+    if (!isDrawMode || !isDraggingSquare || !drawStartLatLng || e.pointerId !== drawPointerId) return;
     e.preventDefault();
     e.stopPropagation();
-    const chosen = lastSquareBounds;
+    drawShift = !!e.shiftKey;
+    const drawn = updateDrawPreview(clientPos(e));
     suppressClickUntil = Date.now() + 400;
-    exitDrawMode();
-    if (chosen) {
-      generateBoardInBounds(chosen);
-    } else {
-      showToast('もう少し大きくドラッグして正方形を引いてください');
+    if (drawn.check.kind === 'too-small') {
+      exitDrawMode();
+      showToast(drawn.check.message);
+      return;
     }
+    // Longitudes of a wrapped world copy are brought back to -180..180; an area across
+    // the antimeridian is not supported
+    const place = window.StreetGoMap.normalizeDrawnBounds(drawn.bounds);
+    if (!place.ok || drawn.check.kind === 'too-thin') {
+      // Stay in draw mode: drop this drag and say why in the banner's live region
+      resetDrawDrag();
+      drawSizeLabel.textContent = '';
+      setDrawError(place.ok ? drawn.check.message : place.message);
+      return;
+    }
+    exitDrawMode();
+    // OK, or too large: generation rejects a too large area with its usual message
+    generateBoardInBounds(place.bounds);
   }, true);
 
   mapEl.addEventListener('pointercancel', (e) => {
     if (!isDrawMode || e.pointerId !== drawPointerId) return;
     // The browser took over the gesture: drop this drag but stay in draw mode
-    releaseDrawPointer();
-    isDraggingSquare = false;
-    drawStartPt = null;
-    lastSquareBounds = null;
-    if (drawPreviewRect) {
-      map.removeLayer(drawPreviewRect);
-      drawPreviewRect = null;
-    }
+    resetDrawDrag();
     drawSizeLabel.textContent = '';
   }, true);
 
-  function updateSquarePreview(currPt) {
-    const { sidePx, bounds } = computeSquareBounds(drawStartPt, currPt);
-    lastSquareBounds = sidePx >= 15 ? bounds : null;
+  function updateDrawPreview(client) {
+    drawLastClient = client;
+    const drawn = computeDrawBounds(client, drawSquareLock());
+    const { bounds } = drawn;
 
     const leafletBounds = [[bounds.south, bounds.west], [bounds.north, bounds.east]];
     if (!drawPreviewRect) {
@@ -1153,13 +1212,17 @@
       drawPreviewRect.setBounds(leafletBounds);
     }
 
-    const sideMeters = Math.round(window.StreetGoMap.distanceMeters(
-      bounds.south, bounds.west, bounds.north, bounds.west
-    ));
-    drawSizeLabel.textContent = sideMeters >= 1000
-      ? `約 ${(sideMeters / 1000).toFixed(2)}km 四方`
-      : `約 ${sideMeters}m 四方`;
+    drawSizeLabel.textContent = window.StreetGoMap.formatRectSize(drawn.widthM, drawn.heightM);
+    return drawn;
   }
+
+  // Redraw the preview from the kept start / pointer (map resized, zoomed or moved, or
+  // Shift pressed / released) so it always shows what releasing would choose
+  function refreshDrawPreview() {
+    if (!isDrawMode || !isDraggingSquare || !drawStartLatLng || !drawLastClient) return;
+    updateDrawPreview(drawLastClient);
+  }
+  map.on('move zoom resize viewreset', refreshDrawPreview);
 
   // Tapping the map background clears the stone info shown by a tap
   map.on('click', () => {
@@ -1180,8 +1243,25 @@
     }
     if (e.key === 'Escape' && isDrawMode) {
       exitDrawMode();
+      return;
     }
+    if (e.key === 'Shift') setDrawShift(e.shiftKey);
   });
+
+  // e.shiftKey (not the key itself): with both Shift keys down, releasing one keeps it true
+  window.addEventListener('keyup', (e) => {
+    if (e.key === 'Shift') setDrawShift(e.shiftKey);
+  });
+
+  // Keys released while the window had no focus never send keyup
+  window.addEventListener('blur', () => setDrawShift(false));
+
+  function setDrawShift(down) {
+    const next = !!down;
+    if (drawShift === next) return;
+    drawShift = next;
+    if (drawPointerType === 'mouse') refreshDrawPreview();
+  }
 
   drawSquareBtn.addEventListener('click', () => {
     if (isDrawMode) exitDrawMode();

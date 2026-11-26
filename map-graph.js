@@ -19,7 +19,20 @@
   const MAX_BOARD_NODES = 450;
   const MAX_OVERPASS_ELEMENTS = 200000;
 
+  // Drawn board area (a rectangle; Shift + mouse drag makes it a square)
+  const MIN_DRAW_SIDE_PX = 15; // shorter side on screen
+  const MAX_DRAW_SIDE_M = 4000; // longer side on the ground
+  const MAX_DRAW_ASPECT = 6; // longer / shorter side
+  const MAX_DRAW_HALF_DIAG_M = 3500; // radius cap of the Overpass request (before the margin)
+  const DRAW_FETCH_MARGIN_M = 60;
+  const MIN_DRAW_FETCH_RADIUS_M = 120;
+
   const MSG_BUSY = '混雑しています。しばらく待って再試行してください';
+  const MSG_DRAW_TOO_SMALL = 'もう少し大きくドラッグして範囲を引いてください';
+  const MSG_DRAW_TOO_LARGE = '指定した範囲が広すぎます。もう少しズームインして一辺 4km 以内の範囲を引いてください。';
+  const MSG_DRAW_TOO_THIN = '範囲が細長すぎます。もう少し幅を広げてください';
+  const MSG_DRAW_BAD_PLACE = 'この位置では範囲を指定できません';
+  const MAX_DRAW_ABS_LAT = 85; // Web Mercator shows about +-85.05 degrees
   const MSG_TOO_FEW = '交点が少なすぎます。範囲を広げるか別の場所を選んでください';
 
   // Cache-busting generation of the bundled preset JSON files only (presets/*.json?v=).
@@ -223,6 +236,19 @@
     return hit ? hit.elements : null;
   }
 
+  // Cached roads usable for a drawn rectangle: some entry's circle must hold all four
+  // corners plus the same margin a new request would add (DRAW_FETCH_MARGIN_M).
+  // The farthest point of a rectangle from any centre is one of its corners.
+  function findCachedRoadsForRect(b, mode = 'simple') {
+    const corners = [[b.south, b.west], [b.south, b.east], [b.north, b.west], [b.north, b.east]];
+    for (const entry of cacheEntries(mode)) {
+      let far = 0;
+      for (const [la, lo] of corners) far = Math.max(far, distanceMeters(entry.lat, entry.lon, la, lo));
+      if (far + DRAW_FETCH_MARGIN_M <= entry.radius + 15) return entry.elements;
+    }
+    return null;
+  }
+
   function seedRoadCache(lat, lon, radius, elements, isPreset = false, mode = 'simple') {
     const entry = { lat, lon, radius, elements, mode: normalizeRoadMode(mode) };
     if (isPreset) {
@@ -360,6 +386,104 @@
       Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) *
       Math.sin(dLon / 2) * Math.sin(dLon / 2);
     return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  }
+
+  // ---------------------------------------------------------------------------
+  // Drawn rectangle helpers (pure; used by app.js and the tests)
+
+  // Screen rectangle of a drag from `start` to `end` ({ x, y } in pixels). With
+  // `square`, the shorter side is stretched to the longer one, keeping the drag direction.
+  function dragRectPx(start, end, square = false) {
+    let dx = end.x - start.x;
+    let dy = end.y - start.y;
+    if (square) {
+      const side = Math.max(Math.abs(dx), Math.abs(dy));
+      dx = (dx >= 0 ? 1 : -1) * side;
+      dy = (dy >= 0 ? 1 : -1) * side;
+    }
+    return {
+      start: { x: start.x, y: start.y },
+      end: { x: start.x + dx, y: start.y + dy },
+      widthPx: Math.abs(dx),
+      heightPx: Math.abs(dy)
+    };
+  }
+
+  // Ground size (m) of bounds { south, west, north, east }: width along the middle
+  // latitude, height along the middle meridian (haversine, like every other distance here).
+  function rectSizeMeters(b) {
+    const midLat = (b.south + b.north) / 2;
+    const midLon = (b.west + b.east) / 2;
+    return {
+      widthM: distanceMeters(midLat, b.west, midLat, b.east),
+      heightM: distanceMeters(b.south, midLon, b.north, midLon)
+    };
+  }
+
+  // Circle around the centre of the bounds that covers all four corners, and the
+  // radius sent to Overpass. Spec: radius = round(distance from the centre to the
+  // farthest corner + 60 m), at least 120 m. "Half the diagonal" is only an approximation
+  // of that distance (the corners nearer the equator are a little farther away).
+  function rectCoverCircle(b) {
+    const lat = (b.south + b.north) / 2;
+    const lon = (b.west + b.east) / 2;
+    let halfDiagM = 0;
+    for (const [la, lo] of [[b.south, b.west], [b.south, b.east], [b.north, b.west], [b.north, b.east]]) {
+      halfDiagM = Math.max(halfDiagM, distanceMeters(lat, lon, la, lo));
+    }
+    return {
+      lat,
+      lon,
+      halfDiagM,
+      radiusM: Math.max(MIN_DRAW_FETCH_RADIUS_M, Math.round(halfDiagM + DRAW_FETCH_MARGIN_M))
+    };
+  }
+
+  // Is a drawn rectangle usable as a board area?
+  // size: { widthM, heightM, widthPx?, heightPx? } (the pixel checks run only when given)
+  // Returns { ok: true } or { ok: false, kind: 'too-small' | 'too-large' | 'too-thin', message }.
+  // Order: too small (shorter side on screen) -> too large -> too thin. The square-only
+  // drawing also rejected a small drag on screen first and a large area only later.
+  function checkDrawnRect(size) {
+    const fail = (kind, message) => ({ ok: false, kind, message });
+    const hasPx = Number.isFinite(size.widthPx) && Number.isFinite(size.heightPx);
+    if (hasPx && !(Math.min(size.widthPx, size.heightPx) >= MIN_DRAW_SIDE_PX)) {
+      return fail('too-small', MSG_DRAW_TOO_SMALL);
+    }
+    const longM = Math.max(size.widthM, size.heightM);
+    const shortM = Math.min(size.widthM, size.heightM);
+    if (!Number.isFinite(longM) || longM > MAX_DRAW_SIDE_M) return fail('too-large', MSG_DRAW_TOO_LARGE);
+    if (!(shortM > 0) || longM / shortM > MAX_DRAW_ASPECT) return fail('too-thin', MSG_DRAW_TOO_THIN);
+    return { ok: true };
+  }
+
+  // Bring drawn bounds into longitude -180..180 (Leaflet gives e.g. +360 on a wrapped
+  // world copy) by moving west and east together by whole turns, and reject what cannot
+  // be a board area: non-finite values, south >= north, west >= east, latitudes outside
+  // +-85 (Web Mercator), and areas across the antimeridian (not supported: too costly
+  // for what it gives). Returns { ok: true, bounds } or { ok: false, kind, message }.
+  function normalizeDrawnBounds(b) {
+    const bad = (kind) => ({ ok: false, kind, message: MSG_DRAW_BAD_PLACE });
+    if (!b) return bad('invalid');
+    const { south, north, west, east } = b;
+    if (![south, north, west, east].every(Number.isFinite)) return bad('invalid');
+    if (!(south < north) || !(west < east)) return bad('invalid');
+    if (south < -MAX_DRAW_ABS_LAT || north > MAX_DRAW_ABS_LAT) return bad('latitude');
+    const mid = (west + east) / 2;
+    const shift = -360 * Math.floor((mid + 180) / 360); // whole turns; 0 when already in range
+    const w = west + shift;
+    const e = east + shift;
+    if (w < -180 || e > 180) return bad('antimeridian');
+    return { ok: true, bounds: { south, west: w, north, east: e } };
+  }
+
+  // "横 420m × 縦 260m" (1000 m and more: "1.23km")
+  function formatRectSize(widthM, heightM) {
+    const fmt = (m) => {
+      const r = Math.round(m);
+      return r >= 1000 ? `${(r / 1000).toFixed(2)}km` : `${r}m`;
+    };
+    return `横 ${fmt(widthM)} × 縦 ${fmt(heightM)}`;
   }
 
   function polylineLength(coords) {
@@ -1072,7 +1196,8 @@ out skel qt;
       return { nodes: new Map(), edges: [], stats: { nodeCount: 0, edgeCount: 0, avgDegree: 0, maxDegree: 0 } };
     }
 
-    // 7. Determine square area (either user-drawn `bounds` or an auto-sized square matching `targetNodes`)
+    // 7. Determine the board area (either the user-drawn rectangle `bounds` or an auto-sized
+    //    square matching `targetNodes`)
     const cosCenterLat = Math.max(0.2, Math.cos((centerLat * Math.PI) / 180));
     let boardBounds = options.bounds || null;
 
@@ -1115,8 +1240,8 @@ out skel qt;
       return { nodes: new Map(), edges: [], boardBounds, stats: { nodeCount: 0, edgeCount: 0, avgDegree: 0, maxDegree: 0 } };
     }
 
-    // Edges are used only if their whole drawn polyline stays inside the square
-    // (a road that leaves the square on the way is not part of the board).
+    // Edges are used only if their whole drawn polyline stays inside the board rectangle
+    // (a road that leaves it on the way is not part of the board).
     const EPS_DEG = 1e-9;
     const edgeInside = (e) => {
       if (!inBox.has(e.u) || !inBox.has(e.v)) return false;
@@ -1750,20 +1875,33 @@ out skel qt;
       if (typeof onProgress === 'function') onProgress(msg);
     };
 
-    const centerLat = (bounds.south + bounds.north) / 2;
-    const centerLon = (bounds.west + bounds.east) / 2;
-    const halfDiag = distanceMeters(bounds.south, bounds.west, bounds.north, bounds.east) / 2;
+    // `bounds` is any rectangle { south, west, north, east }. Checked before any request.
+    const place = normalizeDrawnBounds(bounds);
+    if (!place.ok) throw new StreetGoError('area', place.message);
+    bounds = place.bounds;
+    const circle = rectCoverCircle(bounds);
+    const centerLat = circle.lat;
+    const centerLon = circle.lon;
 
-    if (halfDiag > 3500) {
-      throw new StreetGoError('area', '指定した範囲が広すぎます。もう少しズームインして一辺 4km 以内の正方形を引いてください。');
+    if (!(circle.halfDiagM <= MAX_DRAW_HALF_DIAG_M)) {
+      throw new StreetGoError('area', MSG_DRAW_TOO_LARGE);
+    }
+    const shape = checkDrawnRect(rectSizeMeters(bounds));
+    if (!shape.ok) throw new StreetGoError('area', shape.message);
+
+    // Data at hand (bundled / fetched earlier) is used when its circle holds the whole
+    // rectangle; only a new request uses the circle that covers the rectangle.
+    const fetchRadius = circle.radiusM;
+    const mode = options.includeFootways ? 'all' : 'simple';
+    let elements = findCachedRoadsForRect(bounds, mode);
+    if (elements) {
+      report('道路データを読み込み中...');
+    } else {
+      report(`選択範囲の道路網を取得中 (半径 ${fetchRadius}m)...`);
+      elements = await fetchOverpassRoads(centerLat, centerLon, fetchRadius, { signal, allowNetwork, mode });
     }
 
-    const fetchRadius = Math.max(120, Math.round(halfDiag + 60));
-    report(`選択範囲の道路網を取得中 (半径 ${fetchRadius}m)...`);
-    const mode = options.includeFootways ? 'all' : 'simple';
-    const elements = await fetchOverpassRoads(centerLat, centerLon, fetchRadius, { signal, allowNetwork, mode });
-
-    report('正方形内の交差点グラフを構築中...');
+    report('範囲内の交差点グラフを構築中...');
     const graph = buildRoadGraph(elements, centerLat, centerLon, {
       ...options,
       bounds
@@ -1784,6 +1922,18 @@ out skel qt;
     generateStreetGoBoard,
     generateStreetGoBoardInBounds,
     distanceMeters,
+    dragRectPx,
+    rectSizeMeters,
+    rectCoverCircle,
+    checkDrawnRect,
+    normalizeDrawnBounds,
+    findCachedRoadsForRect,
+    formatRectSize,
+    MIN_DRAW_SIDE_PX,
+    MAX_DRAW_SIDE_M,
+    MAX_DRAW_ASPECT,
+    MAX_DRAW_HALF_DIAG_M,
+    DRAW_FETCH_MARGIN_M,
     // exposed for tests / tooling
     buildRoadGraph,
     pruneToLargestComponent,
