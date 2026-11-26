@@ -11,18 +11,18 @@
   <meta property="og:url" content="https://street-go.tansanfabrik.com/" />
   <link rel="canonical" href="https://street-go.tansanfabrik.com/" />
   <meta name="twitter:card" content="summary" />
-  <meta name="theme-color" content="#f6f7f9" />
+  <meta name="theme-color" content="#f7f7f6" />
   <link
     rel="icon"
     type="image/svg+xml"
-    href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%23e9d8b4'/%3E%3Ccircle cx='22' cy='32' r='14' fill='%23111827'/%3E%3Ccircle cx='42' cy='32' r='14' fill='%23ffffff' stroke='%239ca3af' stroke-width='2'/%3E%3C/svg%3E"
+    href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%23f7f7f6'/%3E%3Ccircle cx='24' cy='32' r='14' fill='%231f1f1f'/%3E%3Ccircle cx='40' cy='32' r='14' fill='%23ffffff' stroke='%231f1f1f' stroke-width='2'/%3E%3C/svg%3E"
   />
   <link
     rel="stylesheet"
-    href="vendor/leaflet/leaflet.css?v=2"
+    href="vendor/leaflet/leaflet.css?v=9"
     integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
   />
-  <link rel="stylesheet" href="style.css?v=2" />
+  <link rel="stylesheet" href="style.css?v=9" />
 </head>
 <body>
   <div id="app">
@@ -39,24 +39,86 @@
         </div>
       </header>
 
+      <!-- Game Info -->
+      <section class="panel" id="game-panel">
+        <div class="panel-title-row">
+          <h2>対局状況</h2>
+          <span id="board-stats" class="mono muted">未生成</span>
+        </div>
+
+        <div class="turn-banner" id="turn-banner">
+          <span class="stone-indicator black" id="turn-stone"></span>
+          <span id="turn-text">盤面を生成してください</span>
+          <span class="komi" title="白に加算">コミ <strong id="komi-value">—</strong></span>
+        </div>
+
+        <div class="score-cards">
+          <div class="score-card black-card">
+            <div class="score-card-header">
+              <span class="stone-dot black"></span>
+              <span>黒（先手）</span>
+              <span id="black-player-tag" class="player-tag" hidden></span>
+            </div>
+            <div class="score-metrics">
+              <div><span class="label">盤上</span><strong id="black-stones">0</strong></div>
+              <div><span class="label">アゲハマ</span><strong id="black-captures">0</strong></div>
+              <div><span class="label">地</span><strong id="black-territory">0</strong></div>
+            </div>
+          </div>
+
+          <div class="score-card white-card">
+            <div class="score-card-header">
+              <span class="stone-dot white"></span>
+              <span>白（後手）</span>
+              <span id="white-player-tag" class="player-tag" hidden></span>
+            </div>
+            <div class="score-metrics">
+              <div><span class="label">盤上</span><strong id="white-stones">0</strong></div>
+              <div><span class="label">アゲハマ</span><strong id="white-captures">0</strong></div>
+              <div><span class="label">地</span><strong id="white-territory">0</strong></div>
+            </div>
+          </div>
+        </div>
+
+        <div id="result-box" class="result-box hidden"></div>
+
+        <div class="action-buttons">
+          <button type="button" id="pass-btn" class="btn secondary" disabled>パス</button>
+          <button type="button" id="undo-btn" class="btn secondary" disabled>待った</button>
+          <button type="button" id="score-btn" class="btn secondary" aria-pressed="false" disabled>形勢表示</button>
+          <button type="button" id="reset-btn" class="btn danger-outline" disabled>最初から</button>
+        </div>
+
+      </section>
+
+      <div id="status-bar" class="status-bar hidden" role="status" aria-live="polite">
+        <span class="spinner"></span>
+        <span id="status-text">地図データを取得中...</span>
+        <button type="button" id="cancel-generate-btn" class="btn secondary btn-sm status-cancel-btn">キャンセル</button>
+      </div>
+      <div id="error-box" class="error-box hidden" role="alert"></div>
+
+      <div class="panel-toggles">
+        <button type="button" id="toggle-setup" class="toggle-btn" aria-expanded="true" aria-controls="setup-panel">盤面をつくる</button>
+        <button type="button" id="toggle-rules" class="toggle-btn" aria-haspopup="dialog">ルールと注意</button>
+      </div>
+
       <!-- Board Setup -->
-      <section class="panel" id="setup-panel">
-        <h2>盤面をつくる</h2>
+      <section class="panel" id="setup-panel" aria-labelledby="setup-panel-title">
+        <h2 id="setup-panel-title" class="visually-hidden">盤面をつくる</h2>
         <form id="search-form">
           <label class="field-label" for="place-input">地名・場所</label>
           <div class="input-row">
             <input
-              id="place-input"
+              id="place-input" aria-describedby="place-hint"
               type="text"
-              placeholder="例: 京都 四条烏丸、渋谷、下北沢"
+              placeholder="例: 京都、東京 銀座、鎌倉"
               value="京都 四条烏丸"
               required
             />
             <button type="submit" id="generate-btn" class="btn primary">生成</button>
           </div>
-          <p class="hint privacy-note">
-            入力した地名は OpenStreetMap の Nominatim に、範囲の座標は Overpass API（overpass-api.de / private.coffee）に送信されます。自宅住所などの個人情報は入力しないでください。
-          </p>
+          <p class="hint" id="place-hint">自宅住所などの個人情報は入力しないでください。</p>
         </form>
 
         <button type="button" id="draw-square-btn" class="btn secondary draw-square-btn">
@@ -64,11 +126,17 @@
         </button>
 
         <div class="presets">
-          <button type="button" class="chip" data-place="京都 四条烏丸">京都・四条烏丸</button>
-          <button type="button" class="chip" data-place="東京 渋谷駅">渋谷</button>
-          <button type="button" class="chip" data-place="東京 下北沢">下北沢</button>
-          <button type="button" class="chip" data-place="札幌 大通公園">札幌・大通</button>
-          <button type="button" class="chip" data-place="Paris Arc de Triomphe">パリ・凱旋門</button>
+          <button type="button" class="chip" data-place="京都 四条烏丸" title="京都・四条烏丸" aria-label="京都・四条烏丸">京都</button>
+          <button type="button" class="chip" data-place="札幌 大通公園" title="札幌・大通" aria-label="札幌・大通">札幌</button>
+          <button type="button" class="chip" data-place="東京 銀座" title="東京・銀座" aria-label="東京・銀座">東京</button>
+          <button type="button" class="chip" data-place="名古屋 栄" title="名古屋・栄" aria-label="名古屋・栄">名古屋</button>
+          <button type="button" class="chip" data-place="上海 南京東路" title="上海・南京東路" aria-label="上海・南京東路">上海</button>
+          <button type="button" class="chip" data-place="ソウル 論峴洞" title="ソウル・論峴洞" aria-label="ソウル・論峴洞">ソウル</button>
+          <button type="button" class="chip" data-place="ニューヨーク ミッドタウン" title="ニューヨーク・ミッドタウン" aria-label="ニューヨーク・ミッドタウン">NY</button>
+          <button type="button" class="chip" data-place="Paris Arc de Triomphe" title="パリ・凱旋門" aria-label="パリ・凱旋門">パリ</button>
+          <button type="button" class="chip" data-place="バルセロナ アシャンプラ" title="バルセロナ・アシャンプラ" aria-label="バルセロナ・アシャンプラ">バルセロナ</button>
+          <button type="button" class="chip" data-place="メルボルン 中心部" title="メルボルン・中心部" aria-label="メルボルン・中心部">メルボルン</button>
+          <button type="button" class="chip" data-place="トリノ 旧市街" title="トリノ・旧市街" aria-label="トリノ・旧市街">トリノ</button>
         </div>
 
         <div class="field-group">
@@ -85,8 +153,8 @@
             <option value="custom">カスタム交点数...</option>
           </select>
           <div id="custom-size-row" class="custom-size-row hidden">
-            <input id="custom-size-input" type="range" min="20" max="400" step="5" value="81" />
-            <input id="custom-size-number" type="number" min="20" max="400" value="81" />
+            <input id="custom-size-input" aria-label="目標交点数" type="range" min="20" max="400" step="5" value="81" />
+            <input id="custom-size-number" aria-label="目標交点数" type="number" min="20" max="400" value="81" />
           </div>
         </div>
 
@@ -95,7 +163,8 @@
           <div class="field-group">
             <label class="field-label" for="mode-select">対戦モード</label>
             <select id="mode-select">
-              <option value="cpu" selected>CPU対戦（あなたが黒）</option>
+              <option value="cpu" selected>CPU対戦（あなたが黒・先手）</option>
+              <option value="cpu-white">CPU対戦（あなたが白・後手）</option>
               <option value="pvp">対人（黒白交互）</option>
             </select>
           </div>
@@ -138,79 +207,8 @@
           </div>
         </details>
 
-        <div id="status-bar" class="status-bar hidden">
-          <span class="spinner"></span>
-          <span id="status-text">地図データを取得中...</span>
-          <button type="button" id="cancel-generate-btn" class="btn secondary btn-sm status-cancel-btn">キャンセル</button>
-        </div>
-        <div id="error-box" class="error-box hidden"></div>
       </section>
 
-      <!-- Game Info -->
-      <section class="panel" id="game-panel">
-        <div class="panel-title-row">
-          <h2>対局状況</h2>
-          <span id="board-stats" class="mono muted">未生成</span>
-        </div>
-
-        <div class="turn-banner" id="turn-banner">
-          <span class="stone-indicator black" id="turn-stone"></span>
-          <span id="turn-text">盤面を生成してください</span>
-        </div>
-
-        <div class="komi-row">
-          <span class="label">コミ（白に加算）</span>
-          <strong id="komi-value">—</strong>
-        </div>
-
-        <div class="score-cards">
-          <div class="score-card black-card">
-            <div class="score-card-header">
-              <span class="stone-dot black"></span>
-              <span>黒（先手）</span>
-            </div>
-            <div class="score-metrics">
-              <div><span class="label">盤上</span><strong id="black-stones">0</strong></div>
-              <div><span class="label">アゲハマ</span><strong id="black-captures">0</strong></div>
-              <div><span class="label">地</span><strong id="black-territory">0</strong></div>
-            </div>
-          </div>
-
-          <div class="score-card white-card">
-            <div class="score-card-header">
-              <span class="stone-dot white"></span>
-              <span>白（後手）</span>
-            </div>
-            <div class="score-metrics">
-              <div><span class="label">盤上</span><strong id="white-stones">0</strong></div>
-              <div><span class="label">アゲハマ</span><strong id="white-captures">0</strong></div>
-              <div><span class="label">地</span><strong id="white-territory">0</strong></div>
-            </div>
-          </div>
-        </div>
-
-        <div id="result-box" class="result-box hidden"></div>
-
-        <div class="action-buttons">
-          <button type="button" id="pass-btn" class="btn secondary" disabled>パス</button>
-          <button type="button" id="undo-btn" class="btn secondary" disabled>待った</button>
-          <button type="button" id="score-btn" class="btn secondary" disabled>形勢表示</button>
-          <button type="button" id="reset-btn" class="btn danger-outline" disabled>最初から</button>
-        </div>
-
-        <div class="rules-note">
-          <p><strong>ルール:</strong> 道の交点が着点、つながる道の数が呼吸点です。石にカーソルを合わせると、その連の残り呼吸点が光ります。</p>
-          <p>以前と同じ石の配置には戻せません（同形反復の禁止）。</p>
-          <p>盤面を単純にするため、1つの交点につながる道は最大4本にし、立体交差などで交わる道は一部を外しています。</p>
-          <p>終局時、盤上に残った石はすべて生きた石として数えます。取れる石は取り切ってからパスしてください。</p>
-        </div>
-      </section>
-
-      <footer class="site-footer">
-        地図・道路データ ©
-        <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a>
-        contributors (<a href="https://opendatacommons.org/licenses/odbl/" target="_blank" rel="noopener">ODbL</a>)
-      </footer>
     </aside>
 
     <!-- Map Canvas -->
@@ -226,12 +224,55 @@
     </main>
   </div>
 
+  <dialog id="rules-dialog" class="rules-dialog" aria-labelledby="rules-dialog-title">
+    <div class="dialog-header">
+      <h2 id="rules-dialog-title">ルールと注意</h2>
+      <button type="button" id="rules-close-btn" class="dialog-close" aria-label="閉じる"></button>
+    </div>
+    <div class="dialog-body rules-body">
+      <h3>囲碁の基本</h3>
+      <ul>
+        <li>黒と白が交互に、空いている交点へ石を1つずつ置きます。置いた石は動かせません。</li>
+        <li>石から道でつながった隣の空き交点を「呼吸点」と呼びます。道でつながった同じ色の石は1つの連になり、呼吸点を共有します。</li>
+        <li>相手の連の呼吸点をすべてふさぐと、その連を盤から取り上げます。</li>
+        <li>置いた直後に自分の連の呼吸点がなくなる場所には打てません。その手で相手の石を取れるときは打てます。</li>
+        <li>打ちたい場所がなければパスします。両者が続けてパスすると終局です。</li>
+        <li>終局時に、盤上の自分の石の数と、自分の石だけで囲んだ空き交点の数を合計します。白にはコミを加え、合計の多いほうが勝ちです。</li>
+        <li>この数え方は中国ルールと呼ばれます。取った石（アゲハマ）は点に入りません。</li>
+        <li>コミは、先に打つ黒が有利な分を埋め合わせるために、白へ加える点です。0.5 の端数があるので、引き分けにはなりません。</li>
+      </ul>
+      <h3>この盤ならではのルール</h3>
+      <ul>
+        <li>盤は碁盤の目ではなく、街の道路です。交点が石を置く場所で、交点から出ている道の数が、石を置いたときの呼吸点の最大数になります。</li>
+        <li>盤面を単純にするため、1つの交点につながる道は原則4本までにし、立体交差などで交わる道は一部を外しています。地図の道と盤の線が違うときは、盤の線に従います。</li>
+        <li>コミは交点数で決まります。20未満は0.5目、20以上40未満は2.5目、40以上70未満は4.5目、70以上は6.5目です。</li>
+        <li>以前と同じ石の配置に戻る手は打てません。直前の盤面だけでなく、その対局で現れたすべての配置が対象です。</li>
+        <li>死石の判定はしません。終局時に盤上に残った石は、すべて生きた石として数えます。取れる石は取り切ってからパスしてください。</li>
+      </ul>
+      <h3>操作</h3>
+      <ul>
+        <li>石にカーソルを合わせるか、石をタップすると、その連の残りの呼吸点が光ります。</li>
+        <li>キーボードでは、Tab キーで空いている交点に移動し、Enter キーかスペースキーで石を置きます。</li>
+        <li>詳細設定の「対戦モード」で、CPU 対戦の先手（黒）と後手（白）、または2人での対人戦を選べます。</li>
+      </ul>
+      <h3>データと通信</h3>
+      <p class="hint">
+          入力した地名は OpenStreetMap の Nominatim に、範囲の座標は Overpass API（overpass-api.de / private.coffee）に送信されます。自宅住所などの個人情報は入力しないでください。
+        </p>
+      <p class="site-footer">
+        地図・道路データ ©
+        <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a>
+        contributors (<a href="https://opendatacommons.org/licenses/odbl/" target="_blank" rel="noopener">ODbL</a>)
+      </p>
+    </div>
+  </dialog>
+
   <script
-    src="vendor/leaflet/leaflet.js?v=2"
+    src="vendor/leaflet/leaflet.js?v=9"
     integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
   ></script>
-  <script src="map-graph.js?v=2"></script>
-  <script src="go-engine.js?v=2"></script>
-  <script src="app.js?v=2"></script>
+  <script src="map-graph.js?v=9"></script>
+  <script src="go-engine.js?v=9"></script>
+  <script src="app.js?v=9"></script>
 </body>
 </html>

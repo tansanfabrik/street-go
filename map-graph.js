@@ -22,8 +22,9 @@
   const MSG_BUSY = '混雑しています。しばらく待って再試行してください';
   const MSG_TOO_FEW = '交点が少なすぎます。範囲を広げるか別の場所を選んでください';
 
-  // Cache-busting generation for bundled files (keep in sync with index.html ?v=)
-  const ASSET_VERSION = '2';
+  // Cache-busting generation of the bundled preset JSON files only (presets/*.json?v=).
+  // Raise it whenever a preset JSON is replaced. It is independent of the ?v= in index.html.
+  const ASSET_VERSION = '4';
   const PRESET_FETCH_TIMEOUT_MS = 15000;
 
   // Bundled preset data (same-origin static JSON; no external request).
@@ -32,38 +33,91 @@
   const PRESETS = [
     {
       query: '京都 四条烏丸',
+      aliases: ['京都', '京都・四条烏丸', '四条烏丸'],
       file: 'presets/kyoto-shijo-karasuma.json',
       lat: 35.0036577,
       lon: 135.7597188,
       displayName: '四条烏丸, 烏丸通, 水銀屋町, 下京区, 京都市, 京都府, 600-8411, 日本'
     },
     {
-      query: '東京 渋谷駅',
-      file: 'presets/tokyo-shibuya.json',
-      lat: 35.6593017,
-      lon: 139.7001474,
-      displayName: '渋谷駅, 神宮通り, 道玄坂二丁目, 道玄坂, 渋谷区, 東京, 150-0043, 日本'
-    },
-    {
-      query: '東京 下北沢',
-      file: 'presets/tokyo-shimokitazawa.json',
-      lat: 35.6616779,
-      lon: 139.6663345,
-      displayName: '下北沢, 北沢二丁目, 北沢, 世田谷区, 東京, 155-0031, 日本'
-    },
-    {
       query: '札幌 大通公園',
+      aliases: ['札幌', '札幌・大通', '大通', '大通公園'],
       file: 'presets/sapporo-odori.json',
       lat: 43.0599018,
       lon: 141.3475101,
       displayName: '大通公園, 中央区, 札幌市, 石狩振興局, 北海道, 北海道地方, 060-0042, 日本'
     },
     {
+      query: '東京 銀座',
+      aliases: ['東京', '東京・銀座', '銀座'],
+      file: 'presets/tokyo-ginza.json',
+      lat: 35.6712,
+      lon: 139.765,
+      displayName: '東京・銀座'
+    },
+    {
+      query: '名古屋 栄',
+      aliases: ['名古屋', '名古屋・栄', '栄'],
+      file: 'presets/nagoya-sakae.json',
+      lat: 35.1712,
+      lon: 136.905,
+      displayName: '名古屋・栄'
+    },
+    {
+      query: '上海 南京東路',
+      aliases: ['上海', '上海・南京東路', '南京東路'],
+      file: 'presets/shanghai-nanjing-road.json',
+      lat: 31.2365,
+      lon: 121.481,
+      displayName: '上海・南京東路'
+    },
+    {
+      query: 'ソウル 論峴洞',
+      aliases: ['ソウル', 'ソウル・論峴洞', '論峴洞'],
+      file: 'presets/seoul-nonhyeon.json',
+      lat: 37.5078,
+      lon: 127.025,
+      displayName: 'ソウル・論峴洞'
+    },
+    {
+      query: 'ニューヨーク ミッドタウン',
+      aliases: ['NY', 'ニューヨーク', 'ニューヨーク・ミッドタウン', 'New York'],
+      file: 'presets/newyork-midtown.json',
+      lat: 40.7536,
+      lon: -73.9832,
+      displayName: 'ニューヨーク・ミッドタウン'
+    },
+    {
       query: 'Paris Arc de Triomphe',
+      aliases: ['パリ', 'パリ・凱旋門', '凱旋門', 'Paris'],
       file: 'presets/paris-arc-de-triomphe.json',
       lat: 48.8738,
       lon: 2.295,
       displayName: 'Paris Arc de Triomphe, Avenue des Ternes, Quartier des Ternes, 17区, パリ, イル＝ド＝フランス地域圏, フランス・メトロポリテーヌ, 75017, フランス'
+    },
+    {
+      query: 'バルセロナ アシャンプラ',
+      aliases: ['バルセロナ', 'バルセロナ・アシャンプラ', 'アシャンプラ'],
+      file: 'presets/barcelona-eixample.json',
+      lat: 41.3925,
+      lon: 2.164,
+      displayName: 'バルセロナ・アシャンプラ'
+    },
+    {
+      query: 'メルボルン 中心部',
+      aliases: ['メルボルン', 'メルボルン・中心部'],
+      file: 'presets/melbourne-cbd.json',
+      lat: -37.811,
+      lon: 144.961,
+      displayName: 'メルボルン・中心部'
+    },
+    {
+      query: 'トリノ 旧市街',
+      aliases: ['トリノ', 'トリノ・旧市街'],
+      file: 'presets/turin-old-town.json',
+      lat: 45.071,
+      lon: 7.683,
+      displayName: 'トリノ・旧市街'
     }
   ];
 
@@ -222,9 +276,24 @@
     }
   }
 
+  // Key for matching a typed name against the presets: full-width / half-width forms
+  // unified (NFKC), "・" and any run of spaces become one space, trimmed, lower-case.
+  // "東京・銀座", "東京　銀座" and " 東京  銀座 " all give "東京 銀座".
+  function presetMatchKey(query) {
+    let s = String(query || '');
+    if (typeof s.normalize === 'function') s = s.normalize('NFKC');
+    return s.replace(/[・\s]+/g, ' ').trim().toLowerCase();
+  }
+
+  // A preset is found by its query (the chip's data-place) or one of its aliases
+  // (the chip label, the full name shown in its title, and the parts of that name).
   function findPreset(query) {
-    const key = normalizeQuery(query);
-    return PRESETS.find((p) => normalizeQuery(p.query) === key) || null;
+    const key = presetMatchKey(query);
+    if (!key) return null;
+    return PRESETS.find((p) =>
+      presetMatchKey(p.query) === key ||
+      (p.aliases || []).some((a) => presetMatchKey(a) === key)
+    ) || null;
   }
 
   // Same-origin fetch of a bundled JSON with a 15 s limit (body included)
@@ -271,6 +340,8 @@
     const preset = findPreset(query);
     if (!preset) return false;
     seedGeocodeCache(preset.query, presetLocation(preset));
+    // The name as typed (e.g. an alias such as "東京") resolves to the same location
+    seedGeocodeCache(query, presetLocation(preset));
     if (preset.loaded) return true;
     const data = await presetFetcher(`${preset.file}?v=${ASSET_VERSION}`, signal);
     throwIfAborted(signal);

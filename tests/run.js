@@ -7,7 +7,7 @@ const fs = require('fs');
 const assert = require('assert');
 
 const ROOT = path.join(__dirname, '..');
-const { GraphGoEngine, komiForNodeCount } = require(path.join(ROOT, 'go-engine.js'));
+const { GraphGoEngine, komiForNodeCount, humanColorForMode, isCpuTurn, undoStepsForActors } = require(path.join(ROOT, 'go-engine.js'));
 const SGM = require(path.join(ROOT, 'map-graph.js'));
 
 // ---------------------------------------------------------------------------
@@ -283,6 +283,185 @@ test('komi steps by number of intersections', () => {
   const s = new GraphGoEngine(makeGrid(5, 5)).computeScore();
   assert.strictEqual(s.winner, 'W');
   assert.strictEqual(s.margin, 2.5);
+});
+
+// ---------------------------------------------------------------------------
+// Game modes (CPU colour, whose turn, undo depth)
+
+test('humanColorForMode: cpu = Black, cpu-white = White, pvp / unknown = none', () => {
+  assert.strictEqual(humanColorForMode('cpu'), 'B');
+  assert.strictEqual(humanColorForMode('cpu-white'), 'W');
+  assert.strictEqual(humanColorForMode('pvp'), null);
+  assert.strictEqual(humanColorForMode(''), null);
+  assert.strictEqual(humanColorForMode(undefined), null);
+});
+
+test('isCpuTurn: 3 modes x turn x game over', () => {
+  const expected = {
+    cpu: { B: false, W: true },
+    'cpu-white': { B: true, W: false },
+    pvp: { B: false, W: false }
+  };
+  for (const mode of Object.keys(expected)) {
+    for (const turn of ['B', 'W']) {
+      assert.strictEqual(isCpuTurn(mode, turn, false), expected[mode][turn], `${mode} ${turn} playing`);
+      assert.strictEqual(isCpuTurn(mode, turn, true), false, `${mode} ${turn} game over`);
+    }
+  }
+  assert.strictEqual(isCpuTurn('cpu', null, false), false);
+  assert.strictEqual(isCpuTurn('unknown', 'W', false), false);
+});
+
+test('isCpuTurn: someone can always move (no deadlock after switching modes)', () => {
+  for (const mode of ['cpu', 'cpu-white', 'pvp']) {
+    for (const turn of ['B', 'W']) {
+      const human = humanColorForMode(mode);
+      const humanCanMove = human === null || human === turn;
+      assert.ok(humanCanMove !== isCpuTurn(mode, turn, false), `${mode} ${turn}`);
+    }
+  }
+});
+
+test('undoStepsForActors: back to the human\'s last ply; nothing when only the CPU has played', () => {
+  const H = 'human';
+  const C = 'cpu';
+  // empty / missing history
+  for (const mode of ['cpu', 'cpu-white', 'pvp']) {
+    assert.strictEqual(undoStepsForActors(mode, []), 0, mode);
+    assert.strictEqual(undoStepsForActors(mode, null), 0, mode);
+  }
+  // pvp: always one ply
+  assert.strictEqual(undoStepsForActors('pvp', [H]), 1);
+  assert.strictEqual(undoStepsForActors('pvp', [H, H]), 1);
+  assert.strictEqual(undoStepsForActors('pvp', [C, C]), 1);
+  // CPU modes: up to and including the human's latest ply
+  for (const mode of ['cpu', 'cpu-white']) {
+    assert.strictEqual(undoStepsForActors(mode, [H]), 1, mode);
+    assert.strictEqual(undoStepsForActors(mode, [H, C]), 2, mode);
+    assert.strictEqual(undoStepsForActors(mode, [C, H, C]), 2, mode);
+    assert.strictEqual(undoStepsForActors(mode, [C, H]), 1, mode);
+    // only the CPU has played
+    assert.strictEqual(undoStepsForActors(mode, [C]), 0, mode);
+    assert.strictEqual(undoStepsForActors(mode, [C, C]), 0, mode);
+  }
+});
+
+test('undoStepsForActors: CPU moves on both sides of a mode switch cannot be undone (review R5)', () => {
+  // cpu-white: the CPU plays Black. Switch to cpu: the CPU now plays White too.
+  // Nobody at the screen has played, so 待った must do nothing (it used to empty the board).
+  const e = new GraphGoEngine(makeGrid(5, 5));
+  const actors = [];
+  let mode = 'cpu-white';
+  assert.ok(isCpuTurn(mode, e.turn, e.gameOver));
+  assert.ok(e.playMove(e.chooseCpuMove('B')).ok);
+  actors.push('cpu');
+  mode = 'cpu';
+  assert.ok(isCpuTurn(mode, e.turn, e.gameOver), 'after the switch White belongs to the CPU');
+  assert.ok(e.playMove(e.chooseCpuMove('W')).ok);
+  actors.push('cpu');
+  assert.strictEqual(e.history.length, actors.length);
+  assert.strictEqual(undoStepsForActors(mode, actors), 0);
+  // The human (Black) is to move, so nobody is stuck
+  assert.ok(!isCpuTurn(mode, e.turn, e.gameOver));
+  // After the human plays and the CPU replies, 待った takes back exactly those two plies
+  assert.ok(e.playMove('0,0').ok);
+  actors.push('human');
+  assert.ok(e.playMove(e.chooseCpuMove('W')).ok);
+  actors.push('cpu');
+  assert.strictEqual(undoStepsForActors(mode, actors), 2);
+});
+
+test('undoStepsForActors: mode switches mid-game use who actually played', () => {
+  const e = new GraphGoEngine(makeGrid(5, 5));
+  const actors = [];
+  const play = (id, actor) => {
+    assert.ok(e.playMove(id).ok, id);
+    actors.push(actor);
+  };
+  // pvp: two humans play B and W
+  play('2,2', 'human');
+  play('1,1', 'human');
+  assert.strictEqual(undoStepsForActors('pvp', actors), 1);
+  // switch to cpu (human Black): Black to move; latest human ply is the last one
+  assert.strictEqual(undoStepsForActors('cpu', actors), 1);
+  play('3,3', 'human'); // B (human)
+  play('1,3', 'cpu'); // W (CPU)
+  assert.strictEqual(undoStepsForActors('cpu', actors), 2);
+  // switch to cpu-white (human White): Black is now the CPU's
+  play('3,1', 'cpu'); // B (CPU)
+  assert.strictEqual(undoStepsForActors('cpu-white', actors), 3, 'back through the CPU plies to the human B move');
+  play('0,2', 'human'); // W (human)
+  assert.strictEqual(undoStepsForActors('cpu-white', actors), 1);
+  // Undo with the engine keeps both arrays the same length and lands on the human's turn
+  const steps = undoStepsForActors('cpu-white', actors);
+  for (let i = 0; i < steps; i++) {
+    assert.ok(e.undo());
+    actors.pop();
+  }
+  assert.strictEqual(e.history.length, actors.length);
+  assert.strictEqual(e.turn, 'W');
+  assert.ok(!isCpuTurn('cpu-white', e.turn, e.gameOver));
+});
+
+test('undoStepsForActors with the engine: the human is to move afterwards', () => {
+  const moves = ['2,2', '1,1', '3,3', '1,3', '3,1', '0,2', '4,2', '2,0'];
+  for (const mode of ['cpu', 'cpu-white']) {
+    const human = humanColorForMode(mode);
+    const e = new GraphGoEngine(makeGrid(5, 5));
+    const actors = [];
+    const actorOf = (color) => (color === human ? 'human' : 'cpu');
+    const play = (id) => {
+      const color = e.turn;
+      assert.ok(e.playMove(id).ok);
+      actors.push(actorOf(color));
+    };
+    const pass = () => {
+      const color = e.turn;
+      assert.ok(e.pass().ok);
+      actors.push(actorOf(color));
+    };
+    const snaps = [snapshot(e)]; // snaps[k] = state after k plies
+    for (const id of moves) {
+      play(id);
+      snaps.push(snapshot(e));
+      if (e.turn !== human) continue;
+      // Human to move after the CPU's reply: undo must land on the previous human turn
+      const steps = undoStepsForActors(mode, actors);
+      const plies = e.history.length;
+      if (plies === 1) {
+        assert.strictEqual(mode, 'cpu-white');
+        assert.strictEqual(steps, 0, 'only the CPU first move: nothing to undo');
+        continue;
+      }
+      assert.strictEqual(steps, 2, `${mode} after ${plies} plies`);
+      for (let i = 0; i < steps; i++) {
+        assert.ok(e.undo());
+        actors.pop();
+      }
+      assert.strictEqual(e.turn, human);
+      assert.ok(!isCpuTurn(mode, e.turn, e.gameOver));
+      assert.strictEqual(snapshot(e), snaps[plies - 2]);
+      // replay the two plies to continue the sequence
+      play(moves[plies - 2]);
+      play(moves[plies - 1]);
+      assert.strictEqual(snapshot(e), snaps[plies]);
+    }
+    // Human passes, CPU passes: game over; undo reopens the game on the human's turn
+    if (e.turn !== human) play('4,4');
+    pass();
+    pass();
+    assert.ok(e.gameOver);
+    assert.ok(!isCpuTurn(mode, e.turn, e.gameOver));
+    const steps = undoStepsForActors(mode, actors);
+    assert.strictEqual(steps, 2);
+    for (let i = 0; i < steps; i++) {
+      e.undo();
+      actors.pop();
+    }
+    assert.strictEqual(e.gameOver, false);
+    assert.strictEqual(e.turn, human);
+    assert.strictEqual(e.history.length, actors.length);
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -657,7 +836,7 @@ test('presets with footpaths enabled: geocode from bundle, roads from Overpass',
   await withFetch(async (url) => {
     urls.push(url);
     return jsonResponse(429, {});
-  }, () => rejectsKind(SGM.generateStreetGoBoard('東京 下北沢', { targetNodes: 81, includeFootways: true }), 'busy'));
+  }, () => rejectsKind(SGM.generateStreetGoBoard('東京 銀座', { targetNodes: 81, includeFootways: true }), 'busy'));
   assert.strictEqual(urls.length, 1);
   assert.ok(urls[0].includes('overpass'), 'no Nominatim request for a preset name');
   SGM.clearCaches();
@@ -675,7 +854,7 @@ test('defaults: merge radius 30 m, dead ends excluded', () => {
 test('bundled presets x 36/81/169 with default settings: simple, planar, spaced, connected', async () => {
   SGM.clearCaches();
   SGM.setPresetFetcher(localPresetFetcher);
-  assert.strictEqual(SGM.PRESETS.length, 5);
+  assert.strictEqual(SGM.PRESETS.length, 11);
   await withFetch(noNetwork(), async () => {
     for (const p of SGM.PRESETS) {
       const data = JSON.parse(fs.readFileSync(path.join(ROOT, p.file), 'utf8'));
@@ -817,12 +996,18 @@ test('F12c: a dead end that appears only after removing a crossing edge is prune
 });
 
 test('F1: small drawn square keeps its spurs when the loops alone are too small', async () => {
+  // Ginza, 250 m square: the closed loops alone (2-core) are fewer than 9 points, and so is
+  // the board once dead ends are pruned after simplification. Only the two fallbacks that
+  // keep the spurs make it playable (without either of them this square is rejected as
+  // too-few; checked by disabling each in map-graph.js).
   SGM.clearCaches();
-  const d = seedPresetRoads('tokyo-shimokitazawa');
-  const b = squareAround(d.location.lat, d.location.lon, 280);
+  const d = seedPresetRoads('tokyo-ginza');
+  const b = squareAround(d.location.lat, d.location.lon, 250);
   const g = await withFetch(noNetwork(), () => SGM.generateStreetGoBoardInBounds(b, {}, null, {}));
   assert.ok(g.stats.nodeCount >= 9 && g.stats.nodeCount <= 20, `${g.stats.nodeCount} points`);
   assert.ok(isConnected(g.nodes));
+  const deadEnds = Array.from(g.nodes.values()).filter((n) => n.neighbors.size === 1).length;
+  assert.ok(deadEnds > 0, 'the board must include kept spurs (dead ends)');
   SGM.clearCaches();
 });
 
@@ -830,7 +1015,7 @@ test('F2: a short board grows within the data at hand before asking the network'
   SGM.clearCaches();
   SGM.setPresetFetcher(localPresetFetcher);
   const g = await withFetch(noNetwork(), () =>
-    SGM.generateStreetGoBoard('東京 下北沢', { targetNodes: 20, mergeRadiusMeters: 5 }, null, {})
+    SGM.generateStreetGoBoard('東京 銀座', { targetNodes: 20, mergeRadiusMeters: 5 }, null, {})
   );
   assert.ok(g.stats.nodeCount >= 17, `${g.stats.nodeCount} points`);
   SGM.clearCaches();
@@ -840,7 +1025,7 @@ test('F6: midpoints are never placed closer than the merge radius', async () => 
   SGM.clearCaches();
   SGM.setPresetFetcher(localPresetFetcher);
   const g = await withFetch(noNetwork(), () =>
-    SGM.generateStreetGoBoard('東京 渋谷駅', { targetNodes: 361, subdivideLongRoads: true, subdivideSpacingMeters: 30 }, null, {})
+    SGM.generateStreetGoBoard('東京 銀座', { targetNodes: 361, subdivideLongRoads: true, subdivideSpacingMeters: 30 }, null, {})
   );
   assert.ok(g.stats.nodeCount >= 9);
   assert.ok(minNodeDistance(g.nodes) >= SGM.DEFAULT_MERGE_RADIUS_M, `min distance ${minNodeDistance(g.nodes)}`);
@@ -848,28 +1033,43 @@ test('F6: midpoints are never placed closer than the merge radius', async () => 
 });
 
 test('F8: no edge of a drawn board leaves the square', async () => {
+  // A 4 x 4 street grid (100 m blocks) inside the square, plus one road whose two ends are
+  // grid corners inside the square but whose middle runs 60 m outside it (below the grid).
+  // Checking only the two ends would keep that road; the whole polyline must be checked.
   SGM.clearCaches();
-  const d = seedPresetRoads('tokyo-shibuya');
-  let boards = 0;
-  for (const side of [400, 600, 900]) {
-    for (const [dx, dy] of [[-0.003, 0], [0, 0], [0.003, 0.002]]) {
-      const b = squareAround(d.location.lat + dy, d.location.lon + dx, side);
-      let g;
-      try {
-        g = await withFetch(noNetwork(), () => SGM.generateStreetGoBoardInBounds(b, {}, null, {}));
-      } catch (err) {
-        if (err.kind === 'too-few') continue;
-        throw err;
-      }
-      boards++;
-      for (const e of g.edges) {
-        for (const [la, lo] of e.coords) {
-          assert.ok(la >= b.south - 1e-9 && la <= b.north + 1e-9 && lo >= b.west - 1e-9 && lo <= b.east + 1e-9, `edge ${e.u}-${e.v} leaves the square`);
-        }
-      }
+  const lat0 = 35;
+  const lon0 = 135;
+  const kLat = 111195;
+  const kLon = 111195 * Math.cos((lat0 * Math.PI) / 180);
+  const at = (xm, ym) => ({ lat: lat0 + ym / kLat, lon: lon0 + xm / kLon });
+  const els = [];
+  const gid = (x, y) => 1 + y * 4 + x;
+  for (let y = 0; y < 4; y++) {
+    for (let x = 0; x < 4; x++) els.push({ type: 'node', id: gid(x, y), ...at(x * 100, y * 100) });
+  }
+  let w = 1;
+  for (let y = 0; y < 4; y++) els.push({ type: 'way', id: w++, nodes: [0, 1, 2, 3].map((x) => gid(x, y)) });
+  for (let x = 0; x < 4; x++) els.push({ type: 'way', id: w++, nodes: [0, 1, 2, 3].map((y) => gid(x, y)) });
+  els.push({ type: 'node', id: 101, ...at(0, -60) }, { type: 'node', id: 102, ...at(300, -60) });
+  els.push({ type: 'way', id: w++, nodes: [gid(0, 0), 101, 102, gid(3, 0)] }); // the detour
+  const sw = at(-20, -20);
+  const ne = at(320, 320);
+  const b = { south: sw.lat, west: sw.lon, north: ne.lat, east: ne.lon };
+  const centre = at(150, 150);
+  SGM.seedRoadCache(centre.lat, centre.lon, 1000, els, false);
+  const g = await withFetch(noNetwork(), () =>
+    SGM.generateStreetGoBoardInBounds(b, { mergeRadiusMeters: 5, includeDeadEnds: true }, null, {}));
+  // Both ends of the detour are board points, so only the inside check can drop the road
+  const pointAt = (p) => Array.from(g.nodes.values()).find((n) => Math.abs(n.lat - p.lat) < 1e-7 && Math.abs(n.lon - p.lon) < 1e-7);
+  const endA = pointAt(at(0, 0));
+  const endB = pointAt(at(300, 0));
+  assert.ok(endA && endB, 'detour ends should be board points');
+  assert.ok(!endA.neighbors.has(endB.id), 'the detour must not link its two ends');
+  for (const e of g.edges) {
+    for (const [la, lo] of e.coords) {
+      assert.ok(la >= b.south - 1e-9 && la <= b.north + 1e-9 && lo >= b.west - 1e-9 && lo <= b.east + 1e-9, `edge ${e.u}-${e.v} leaves the square`);
     }
   }
-  assert.ok(boards >= 5);
   SGM.clearCaches();
 });
 
@@ -907,11 +1107,11 @@ test('F5/F10: preset JSON is versioned, must be roadMode "simple", and never nee
   });
   let urls = [];
   await withFetch(async (url) => { urls.push(url); return jsonResponse(429, {}); },
-    () => rejectsKind(SGM.generateStreetGoBoard('東京 渋谷駅', { targetNodes: 81 }), 'busy'));
+    () => rejectsKind(SGM.generateStreetGoBoard('東京 銀座', { targetNodes: 81 }), 'busy'));
   assert.ok(requested[0].endsWith(`.json?v=${SGM.ASSET_VERSION}`), requested[0]);
   assert.strictEqual(urls.length, 1);
   assert.ok(urls[0].includes('overpass'));
-  assert.ok(SGM.findCachedRoads(35.6593017, 139.7001474, 300) === null, 'old bundle must not be registered');
+  assert.ok(SGM.findCachedRoads(35.6712, 139.765, 300) === null, 'old bundle must not be registered');
 
   // 2. bundle cannot be loaded at all -> still no Nominatim
   SGM.clearCaches();
@@ -950,6 +1150,112 @@ test('F9: tunnels other than "no" are excluded, covered=arcade stays', () => {
   assert.ok(q.includes('(if: !is_tag("tunnel") || t["tunnel"] == "no")'));
   assert.ok(q.includes('["covered"!="yes"]'));
   assert.ok(!/covered"!~|arcade/.test(q));
+});
+
+// ---------------------------------------------------------------------------
+// Review fixes (R1, R16)
+
+// The preset chips in index.html: data-place (= query), label and title (full name)
+function presetChips() {
+  const html = fs.readFileSync(path.join(ROOT, 'index.html'), 'utf8');
+  const chips = [];
+  const re = /<button[^>]*class="chip"[^>]*data-place="([^"]+)"[^>]*title="([^"]+)"[^>]*>([^<]+)<\/button>/g;
+  let m;
+  while ((m = re.exec(html)) !== null) chips.push({ place: m[1], title: m[2], label: m[3].trim() });
+  return chips;
+}
+
+test('R1: every preset is found by its query, chip label and full name', () => {
+  const chips = presetChips();
+  assert.strictEqual(chips.length, 11);
+  assert.strictEqual(SGM.PRESETS.length, 11);
+  for (const p of SGM.PRESETS) {
+    const chip = chips.find((c) => c.place === p.query);
+    assert.ok(chip, `no chip for ${p.query}`);
+    for (const name of [p.query, chip.label, chip.title]) {
+      assert.strictEqual(SGM.findPreset(name), p, `"${name}" should select ${p.query}`);
+    }
+  }
+  // Spacing, the middle dot, full-width forms and letter case do not matter
+  const ginza = SGM.findPreset('東京 銀座');
+  for (const name of ['東京・銀座', '東京　銀座', '  東京   銀座 ', '東京･銀座', '銀座', '東京']) {
+    assert.strictEqual(SGM.findPreset(name), ginza, name);
+  }
+  const ny = SGM.findPreset('ニューヨーク ミッドタウン');
+  for (const name of ['NY', 'ny', 'ＮＹ', 'ニューヨーク', 'ニューヨーク・ミッドタウン']) {
+    assert.strictEqual(SGM.findPreset(name), ny, name);
+  }
+  assert.strictEqual(SGM.findPreset('京都'), SGM.findPreset('京都 四条烏丸'));
+  assert.strictEqual(SGM.findPreset('札幌'), SGM.findPreset('札幌 大通公園'));
+  assert.strictEqual(SGM.findPreset('パリ'), SGM.findPreset('Paris Arc de Triomphe'));
+  assert.strictEqual(SGM.findPreset('paris arc de triomphe'), SGM.findPreset('Paris Arc de Triomphe'));
+});
+
+test('R1: unrelated names do not match a preset; no alias is shared', () => {
+  for (const name of ['大阪', '渋谷', '下北沢', '東京 渋谷', '京都駅', '', '  ', '・', 'New', 'ミッドタウン', '中心部', '旧市街']) {
+    assert.strictEqual(SGM.findPreset(name), null, `"${name}" must not match`);
+  }
+  const owner = new Map();
+  for (const p of SGM.PRESETS) {
+    for (const a of [p.query].concat(p.aliases || [])) {
+      const hit = SGM.findPreset(a);
+      assert.strictEqual(hit, p, `alias "${a}" of ${p.query} resolves to ${hit && hit.query}`);
+      const key = a.normalize('NFKC').replace(/[・\s]+/g, ' ').trim().toLowerCase();
+      assert.ok(!owner.has(key) || owner.get(key) === p, `"${a}" is used by two presets`);
+      owner.set(key, p);
+    }
+  }
+});
+
+test('R1: typing a preset name (chip label / full name) never contacts Nominatim or Overpass', async () => {
+  SGM.setPresetFetcher(localPresetFetcher);
+  for (const name of ['東京', '東京・銀座', 'NY', 'ニューヨーク', '京都', 'パリ・凱旋門']) {
+    SGM.clearCaches();
+    const g = await withFetch(noNetwork(), () =>
+      SGM.generateStreetGoBoard(name, { targetNodes: 81 }, null, { allowNetwork: true }));
+    assert.ok(g.stats.nodeCount >= 9, `${name}: ${g.stats.nodeCount}`);
+    const p = SGM.findPreset(name);
+    assert.strictEqual(g.location.lat, p.lat, name);
+    assert.strictEqual(g.location.lon, p.lon, name);
+  }
+  // An unrelated name still goes to Nominatim
+  SGM.clearCaches();
+  const urls = [];
+  await withFetch(async (url) => { urls.push(url); return jsonResponse(429, {}); },
+    () => rejectsKind(SGM.generateStreetGoBoard('大阪', { targetNodes: 81 }), 'busy'));
+  assert.strictEqual(urls.length, 1);
+  assert.ok(urls[0].includes('nominatim'));
+  SGM.clearCaches();
+});
+
+test('R16: index.html uses one ?v= for every file; style.css fonts carry it too', () => {
+  const html = fs.readFileSync(path.join(ROOT, 'index.html'), 'utf8');
+  const versions = Array.from(html.matchAll(/\?v=([^"'&\s]+)/g), (m) => m[1]);
+  assert.ok(versions.length >= 6, `only ${versions.length} versioned URLs`);
+  assert.deepStrictEqual(Array.from(new Set(versions)), [versions[0]], `mixed versions: ${versions.join(', ')}`);
+  for (const file of ['style.css', 'app.js', 'go-engine.js', 'map-graph.js', 'vendor/leaflet/leaflet.js', 'vendor/leaflet/leaflet.css']) {
+    assert.ok(html.includes(`${file}?v=${versions[0]}`), `${file} without ?v=${versions[0]}`);
+  }
+  const css = fs.readFileSync(path.join(ROOT, 'style.css'), 'utf8');
+  const fontUrls = Array.from(css.matchAll(/url\("(vendor\/fonts\/[^"]+)"\)/g), (m) => m[1]);
+  assert.ok(fontUrls.length > 0);
+  for (const u of fontUrls) assert.ok(u.endsWith(`.woff2?v=${versions[0]}`), u);
+});
+
+test('R16: preset JSON requests carry ASSET_VERSION (its own generation)', async () => {
+  assert.ok(typeof SGM.ASSET_VERSION === 'string' && /^\w+$/.test(SGM.ASSET_VERSION), `ASSET_VERSION ${SGM.ASSET_VERSION}`);
+  const requested = [];
+  SGM.setPresetFetcher(async (url) => {
+    requested.push(url);
+    return readPreset(url);
+  });
+  for (const p of SGM.PRESETS) {
+    SGM.clearCaches();
+    await withFetch(noNetwork(), () => SGM.generateStreetGoBoard(p.query, { targetNodes: 36 }, null, { allowNetwork: false }));
+  }
+  assert.deepStrictEqual(requested, SGM.PRESETS.map((p) => `${p.file}?v=${SGM.ASSET_VERSION}`));
+  SGM.setPresetFetcher(localPresetFetcher);
+  SGM.clearCaches();
 });
 
 // ---------------------------------------------------------------------------

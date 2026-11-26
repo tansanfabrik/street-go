@@ -9,6 +9,40 @@
     return 6.5;
   }
 
+  // Game modes (values of the mode <select>):
+  //   'cpu'       human plays Black (moves first), CPU plays White
+  //   'cpu-white' human plays White, CPU plays Black (moves first)
+  //   'pvp'       two humans alternate on one device
+  // Returns the human's colour ('B' | 'W'), or null when there is no CPU.
+  function humanColorForMode(mode) {
+    if (mode === 'cpu') return 'B';
+    if (mode === 'cpu-white') return 'W';
+    return null;
+  }
+
+  // True when the CPU should move now: a CPU mode, game not over, and it is not the human's turn.
+  function isCpuTurn(mode, turn, gameOver) {
+    const human = humanColorForMode(mode);
+    if (human === null || gameOver) return false;
+    return (turn === 'B' || turn === 'W') && turn !== human;
+  }
+
+  // How many undo steps one press of "待った" takes (0 = nothing to undo).
+  // `actors` runs parallel to engine.history: actors[i] is 'human' or 'cpu', the one who
+  // made history[i] (a move or a pass; in pvp every ply is 'human').
+  // pvp: one ply. CPU modes: back to (and including) the latest ply made by the human,
+  // so the human is to move afterwards; 0 when the human has made no ply at all
+  // (e.g. only CPU moves are on the board, even after switching modes).
+  function undoStepsForActors(mode, actors) {
+    const n = Array.isArray(actors) ? actors.length : 0;
+    if (n === 0) return 0;
+    if (humanColorForMode(mode) === null) return 1;
+    for (let i = n - 1; i >= 0; i--) {
+      if (actors[i] === 'human') return n - i;
+    }
+    return 0;
+  }
+
   class GraphGoEngine {
     constructor(nodesMap, options = {}) {
       this.nodes = nodesMap; // Map<id, { id, lat, lon, neighbors: Set<id> }>
@@ -419,7 +453,10 @@
 
   global.GraphGoEngine = GraphGoEngine;
   global.komiForNodeCount = komiForNodeCount;
+  global.humanColorForMode = humanColorForMode;
+  global.isCpuTurn = isCpuTurn;
+  global.undoStepsForActors = undoStepsForActors;
   if (typeof module !== 'undefined' && module.exports) {
-    module.exports = { GraphGoEngine, komiForNodeCount };
+    module.exports = { GraphGoEngine, komiForNodeCount, humanColorForMode, isCpuTurn, undoStepsForActors };
   }
 })(typeof window !== 'undefined' ? window : globalThis);
