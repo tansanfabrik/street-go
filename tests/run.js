@@ -869,7 +869,8 @@ test('bundled presets x 36/81/169 with default settings: simple, planar, spaced,
         assert.strictEqual(SGM.countEdgeCrossings(b.nodes, b.edges), 0, `${label}: crossings`);
         assert.ok(minNodeDistance(b.nodes) >= SGM.DEFAULT_MERGE_RADIUS_M, `${label}: min distance ${minNodeDistance(b.nodes)}`);
         assert.ok(isConnected(b.nodes), `${label}: not connected`);
-        for (const n of b.nodes.values()) assert.ok(n.neighbors.size > 0, `${label}: isolated point`);
+        // dead ends are excluded by default: every point has at least two roads
+        for (const n of b.nodes.values()) assert.ok(n.neighbors.size >= 2, `${label}: ${n.id} has ${n.neighbors.size} road(s)`);
       }
     }
     // Offline initial board even if a large size was restored by the browser
@@ -1106,7 +1107,7 @@ test('rect: landscape and portrait rectangles on bundled data make valid boards 
       assert.ok(maxDeg(g.nodes) <= 4, `${label}: max degree ${maxDeg(g.nodes)}`);
       assert.strictEqual(SGM.countEdgeCrossings(g.nodes, g.edges), 0, `${label}: crossings`);
       assert.ok(isConnected(g.nodes), `${label}: not connected`);
-      for (const n of g.nodes.values()) assert.ok(n.neighbors.size > 0, `${label}: isolated point`);
+      for (const n of g.nodes.values()) assert.ok(n.neighbors.size >= 2, `${label}: ${n.id} has ${n.neighbors.size} road(s)`);
       assert.deepStrictEqual(g.customBounds, b, `${label}: the frame is the drawn rectangle`);
       const size = SGM.rectSizeMeters(g.customBounds);
       assert.ok(w > h ? size.widthM > size.heightM : size.heightM > size.widthM, `${label}: frame orientation`);
@@ -1117,19 +1118,26 @@ test('rect: landscape and portrait rectangles on bundled data make valid boards 
 
 // Recorded with the square-only version (HEAD before rectangles: `git show HEAD:map-graph.js`
 // loaded in node): point ids and road end pairs (each pair sorted, then the list sorted)
+// tokyo-ginza updated when the degree cap began to keep roads running straight through a
+// point: at n53 (35.670427, 139.766073, five roads) it now drops n53-n621 (50 m, bending)
+// instead of n53-n166 (135 m, continuing the road from n257 straight through n53).
+// Point positions (lat,lon to 5 decimals) recorded too, so a moved point is noticed.
 const SQUARE_400_EXPECTED = {
   'nagoya-sakae': {
+    pos: ["n110:35.17076,136.90670", "n111:35.17263,136.90648", "n20:35.16990,136.90680", "n291:35.17145,136.90309", "n292:35.17153,136.90427", "n293:35.17161,136.90545", "n296:35.17051,136.90318", "n297:35.17060,136.90438", "n298:35.17067,136.90555", "n301:35.17239,136.90299", "n302:35.17248,136.90418", "n303:35.17256,136.90536", "n70:35.17169,136.90660", "n94:35.16966,136.90328", "n95:35.16974,136.90447", "n96:35.16982,136.90563"],
     ids: ["n110", "n111", "n20", "n291", "n292", "n293", "n296", "n297", "n298", "n301", "n302", "n303", "n70", "n94", "n95", "n96"],
     edges: ["n110-n20", "n110-n298", "n110-n70", "n111-n303", "n111-n70", "n20-n96", "n291-n292", "n291-n296", "n291-n301", "n292-n293", "n292-n297", "n292-n302", "n293-n298", "n293-n303", "n293-n70", "n296-n297", "n296-n94", "n297-n298", "n297-n95", "n298-n96", "n301-n302", "n302-n303", "n94-n95", "n95-n96"]
   },
   'tokyo-ginza': {
+    pos: ["n135:35.67206,139.76392", "n139:35.67031,139.76407", "n151:35.66955,139.76515", "n152:35.67204,139.76591", "n166:35.67122,139.76709", "n222:35.67082,139.76559", "n257:35.67012,139.76567", "n339:35.67112,139.76292", "n345:35.67085,139.76330", "n346:35.67062,139.76364", "n366:35.67258,139.76514", "n367:35.67235,139.76547", "n368:35.67285,139.76475", "n373:35.67166,139.76647", "n38:35.67122,139.76504", "n52:35.67252,139.76325", "n53:35.67043,139.76607", "n54:35.67166,139.76446", "n56:35.66999,139.76656", "n581:35.67221,139.76360", "n621:35.67046,139.76656", "n673:35.67252,139.76439", "n703:35.67002,139.76602", "n704:35.66995,139.76458", "n710:35.67046,139.76518", "n776:35.67289,139.76385"],
     ids: ["n135", "n139", "n151", "n152", "n166", "n222", "n257", "n339", "n345", "n346", "n366", "n367", "n368", "n373", "n38", "n52", "n53", "n54", "n56", "n581", "n621", "n673", "n703", "n704", "n710", "n776"],
-    edges: ["n135-n339", "n135-n52", "n135-n581", "n135-n673", "n139-n346", "n139-n38", "n139-n704", "n151-n257", "n151-n703", "n151-n704", "n152-n367", "n152-n373", "n152-n38", "n166-n373", "n166-n621", "n222-n373", "n222-n38", "n222-n710", "n257-n53", "n257-n710", "n339-n345", "n345-n346", "n345-n54", "n346-n54", "n366-n367", "n366-n368", "n366-n54", "n367-n54", "n368-n673", "n52-n581", "n52-n776", "n53-n56", "n53-n621", "n53-n703", "n56-n621", "n56-n703", "n673-n776", "n704-n710"]
+    edges: ["n135-n339", "n135-n52", "n135-n581", "n135-n673", "n139-n346", "n139-n38", "n139-n704", "n151-n257", "n151-n703", "n151-n704", "n152-n367", "n152-n373", "n152-n38", "n166-n373", "n166-n53", "n166-n621", "n222-n373", "n222-n38", "n222-n710", "n257-n53", "n257-n710", "n339-n345", "n345-n346", "n345-n54", "n346-n54", "n366-n367", "n366-n368", "n366-n54", "n367-n54", "n368-n673", "n52-n581", "n52-n776", "n53-n56", "n53-n703", "n56-n621", "n56-n703", "n673-n776", "n704-n710"]
   }
 };
 
 function boardSignature(g) {
   return {
+    pos: Array.from(g.nodes.values()).map((n) => `${n.id}:${n.lat.toFixed(5)},${n.lon.toFixed(5)}`).sort(),
     ids: Array.from(g.nodes.keys()).map(String).sort(),
     edges: g.edges.map((e) => [String(e.u), String(e.v)].sort().join('-')).sort()
   };
@@ -1654,6 +1662,422 @@ test('stones: Kyoto 81 points, zooms 13-18 and fractional: sizes in range, centr
     }
   }
   assert.ok(shrunk > 0, 'no point was made smaller on the Kyoto board');
+  SGM.clearCaches();
+});
+
+// ---------------------------------------------------------------------------
+// Board edge margin, straight-through roads at the degree cap, drawn shapes.
+// Places on the Kyoto board are fixed by OpenStreetMap node / way ids of the bundled data.
+
+// Local metres around a reference latitude (same scale as the board code)
+function metresProjector(lat0, lon0) {
+  const kx = 111320 * Math.cos((lat0 * Math.PI) / 180);
+  return (lat, lon) => [(lon - lon0) * kx, (lat - lat0) * 110540];
+}
+
+function pointSegDist(p, a, b) {
+  const abx = b[0] - a[0];
+  const aby = b[1] - a[1];
+  const l2 = abx * abx + aby * aby;
+  const t = l2 > 0 ? Math.max(0, Math.min(1, ((p[0] - a[0]) * abx + (p[1] - a[1]) * aby) / l2)) : 0;
+  return Math.hypot(p[0] - a[0] - abx * t, p[1] - a[1] - aby * t);
+}
+
+function pointPolyDist(p, poly) {
+  let m = Infinity;
+  for (let i = 1; i < poly.length; i++) m = Math.min(m, pointSegDist(p, poly[i - 1], poly[i]));
+  return m;
+}
+
+async function kyotoBoard81() {
+  SGM.clearCaches();
+  SGM.setPresetFetcher(localPresetFetcher);
+  const board = await withFetch(noNetwork(), () =>
+    SGM.generateStreetGoBoard('京都 四条烏丸', { targetNodes: 81 }, null, { allowNetwork: false }));
+  const data = readPreset('presets/kyoto-shijo-karasuma.json');
+  const osm = new Map();
+  for (const el of data.elements) if (el.type === 'node') osm.set(el.id, el);
+  const proj = metresProjector(data.location.lat, data.location.lon);
+  // Board point closest to the middle of the given OSM nodes (a merged junction)
+  const pointAt = (ids, maxM = 20) => {
+    const ps = ids.map((id) => proj(osm.get(id).lat, osm.get(id).lon));
+    const c = [ps.reduce((s, p) => s + p[0], 0) / ps.length, ps.reduce((s, p) => s + p[1], 0) / ps.length];
+    let best = null;
+    let bestD = Infinity;
+    for (const n of board.nodes.values()) {
+      const d = Math.hypot(proj(n.lat, n.lon)[0] - c[0], proj(n.lat, n.lon)[1] - c[1]);
+      if (d < bestD) { bestD = d; best = n; }
+    }
+    assert.ok(bestD <= maxM, `no board point within ${maxM} m of OSM ${ids.join('/')} (nearest ${bestD.toFixed(1)} m)`);
+    return best;
+  };
+  const edgeOf = (a, b) => board.edges.find((e) => (e.u === a && e.v === b) || (e.u === b && e.v === a));
+  return { board, data, osm, proj, pointAt, edgeOf };
+}
+
+test('shape: Kyoto 81 puts the merged point at Karasuma x Matsubara on Karasuma-dori, with no sliver', async () => {
+  const k = await kyotoBoard81();
+  // Karasuma x Takatsuji (both carriageways) and the next Karasuma junction to the south
+  const north = k.pointAt([318382992, 354841418]);
+  const south = k.pointAt([318382970, 388224025]);
+  // The point merged from 354837015 (on the east carriageway) and the junction 28 m east of it
+  const mid = k.pointAt([354837015], 30);
+  assert.ok(mid.id !== north.id && mid.id !== south.id);
+  const pn = k.proj(north.lat, north.lon);
+  const ps = k.proj(south.lat, south.lon);
+  const pm = k.proj(mid.lat, mid.lon);
+  const off = pointSegDist(pm, pn, ps);
+  assert.ok(off <= 3, `the point is ${off.toFixed(1)} m off the line of Karasuma-dori`);
+  assert.ok(mid.neighbors.has(north.id) && mid.neighbors.has(south.id), 'joined to both Karasuma neighbours');
+  // Directions of the drawn roads 15 m out from the point
+  const dirOf = (e) => {
+    const pts = (e.u === mid.id ? e.coords : e.coords.slice().reverse()).map(([lat, lon]) => k.proj(lat, lon));
+    let acc = 0;
+    let target = pts[pts.length - 1];
+    for (let i = 1; i < pts.length; i++) {
+      const seg = Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]);
+      if (acc + seg >= 15) {
+        const t = (15 - acc) / seg;
+        target = [pts[i - 1][0] + (pts[i][0] - pts[i - 1][0]) * t, pts[i - 1][1] + (pts[i][1] - pts[i - 1][1]) * t];
+        break;
+      }
+      acc += seg;
+    }
+    return Math.atan2(target[1] - pts[0][1], target[0] - pts[0][0]);
+  };
+  const angle = (a, b) => {
+    let d = Math.abs(a - b) % (2 * Math.PI);
+    if (d > Math.PI) d = 2 * Math.PI - d;
+    return (d * 180) / Math.PI;
+  };
+  const roads = k.board.edges.filter((e) => e.u === mid.id || e.v === mid.id);
+  const toNorth = roads.find((e) => e.u === north.id || e.v === north.id);
+  const toSouth = roads.find((e) => e.u === south.id || e.v === south.id);
+  assert.ok(angle(dirOf(toNorth), dirOf(toSouth)) >= 170, 'Karasuma-dori runs straight through the point');
+  const dirs = roads.map(dirOf);
+  for (let a = 0; a < dirs.length; a++) {
+    for (let b = a + 1; b < dirs.length; b++) {
+      assert.ok(angle(dirs[a], dirs[b]) >= 25, `roads at the point meet at ${angle(dirs[a], dirs[b]).toFixed(0)} degrees`);
+    }
+  }
+  SGM.clearCaches();
+});
+
+test('shape: Kyoto 81 has Fuyacho-dori (on the east edge) from its south end up past Takoyakushi', async () => {
+  const k = await kyotoBoard81();
+  const ways = k.data.elements.filter((el) => el.type === 'way' && (el.id === 30175871 || el.id === 772134677));
+  assert.strictEqual(ways.length, 2);
+  const lines = ways.map((w) => w.nodes.map((id) => k.proj(k.osm.get(id).lat, k.osm.get(id).lon)));
+  const distToStreet = (p) => Math.min(...lines.map((l) => pointPolyDist(p, l)));
+  const onStreet = Array.from(k.board.nodes.values()).filter((n) => distToStreet(k.proj(n.lat, n.lon)) < 12);
+  assert.ok(onStreet.length >= 6, `only ${onStreet.length} board points on Fuyacho-dori`);
+  onStreet.sort((a, b) => a.lat - b.lat);
+  const first = onStreet[0];
+  const last = onStreet[onStreet.length - 1];
+  assert.ok(first.lat < 34.9992, `southernmost Fuyacho point at ${first.lat}`);
+  assert.ok(last.lat > 35.0060, `northernmost Fuyacho point at ${last.lat} (Takoyakushi is about 35.0062)`);
+  // Walk from the south end to the north end using only roads drawn along the street
+  const ids = new Set(onStreet.map((n) => n.id));
+  const along = k.board.edges.filter((e) => ids.has(e.u) && ids.has(e.v) &&
+    e.coords.every(([lat, lon]) => distToStreet(k.proj(lat, lon)) < 12));
+  const seen = new Set([first.id]);
+  const stack = [first.id];
+  while (stack.length) {
+    const cur = stack.pop();
+    for (const e of along) {
+      const nb = e.u === cur ? e.v : e.v === cur ? e.u : null;
+      if (nb && !seen.has(nb)) { seen.add(nb); stack.push(nb); }
+    }
+  }
+  assert.ok(seen.has(last.id), `Fuyacho-dori is broken between ${first.id} and ${last.id}`);
+  SGM.clearCaches();
+});
+
+test('shape: Kyoto 81 roads north and south of the staggered Bukkoji junction have no kink near it', async () => {
+  const k = await kyotoBoard81();
+  // Bukkoji-dori: the road from the north meets it at 309117163, the one to the south leaves at 309117162
+  const p = k.pointAt([309117163, 309117162]);
+  const pp = k.proj(p.lat, p.lon);
+  let checked = 0;
+  for (const e of k.board.edges) {
+    if (e.u !== p.id && e.v !== p.id) continue;
+    const pts = (e.u === p.id ? e.coords : e.coords.slice().reverse()).map(([lat, lon]) => k.proj(lat, lon));
+    const end = pts[pts.length - 1];
+    if (Math.abs(end[1] - pp[1]) < Math.abs(end[0] - pp[0])) continue; // east / west roads
+    checked++;
+    let along = 0;
+    for (let i = 1; i < pts.length - 1; i++) {
+      along += Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]);
+      if (along > 40) break;
+      const v1 = [pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]];
+      const v2 = [pts[i + 1][0] - pts[i][0], pts[i + 1][1] - pts[i][1]];
+      const l1 = Math.hypot(...v1);
+      const l2 = Math.hypot(...v2);
+      if (l1 < 2 || l2 < 2) continue;
+      const turn = (Math.acos(Math.max(-1, Math.min(1, (v1[0] * v2[0] + v1[1] * v2[1]) / (l1 * l2)))) * 180) / Math.PI;
+      assert.ok(turn < 15, `${e.u}-${e.v} bends ${turn.toFixed(0)} degrees ${along.toFixed(0)} m from the junction`);
+    }
+  }
+  assert.strictEqual(checked, 2, 'expected one road to the north and one to the south');
+  SGM.clearCaches();
+});
+
+// Nodes / edges in local metres around (35, 135) for buildDisplayShapes
+function metreGraph(points, edgeList) {
+  const kx = 111320 * Math.cos((35 * Math.PI) / 180);
+  const ll = ([x, y]) => [35 + y / 110540, 135 + x / kx];
+  const nodes = new Map();
+  for (const [id, p] of Object.entries(points)) {
+    const [lat, lon] = ll(p);
+    nodes.set(id, { id, lat, lon, neighbors: new Set() });
+  }
+  const edges = edgeList.map(([u, v, via]) => {
+    nodes.get(u).neighbors.add(v);
+    nodes.get(v).neighbors.add(u);
+    return { u, v, coords: [points[u], ...(via || []), points[v]].map(ll) };
+  });
+  return { nodes, edges, ll };
+}
+
+test('shape: nearly straight roads become straight lines, real corners stay', () => {
+  const { nodes, edges } = metreGraph(
+    { a: [0, 0], b: [100, 0], c: [0, 100], d: [20, 120] },
+    [['a', 'b', [[30, 3], [70, -2]]], ['c', 'd', [[20, 100]]]]
+  );
+  const out = SGM.buildDisplayShapes(nodes, edges, null);
+  assert.strictEqual(out[0].coords.length, 2, 'a road within 8 m of its chord is drawn straight');
+  assert.strictEqual(out[0].roadCoords.length, 4, 'the road course is kept');
+  assert.strictEqual(out[1].coords.length, 3, 'a 20 m + 20 m corner stays');
+});
+
+test('shape: a simpler line that would cross another road keeps the road course', () => {
+  // a-b bulges 6 m south; e-f dips to 3 m below the chord of a-b without touching the road
+  const { nodes, edges } = metreGraph(
+    { a: [0, 0], b: [100, 0], e: [50, 30], f: [60, 30] },
+    [['a', 'b', [[50, -6]]], ['e', 'f', [[50, -3], [60, -3]]]]
+  );
+  assert.strictEqual(SGM.countEdgeCrossings(nodes, edges), 0);
+  const out = SGM.buildDisplayShapes(nodes, edges, null);
+  assert.strictEqual(out[0].coords.length, 3, 'a-b stays on its road course');
+  assert.strictEqual(SGM.countEdgeCrossings(nodes, out), 0);
+  // Without e-f the same road is drawn straight
+  const alone = metreGraph({ a: [0, 0], b: [100, 0] }, [['a', 'b', [[50, -6]]]]);
+  assert.strictEqual(SGM.buildDisplayShapes(alone.nodes, alone.edges, null)[0].coords.length, 2);
+});
+
+test('sliver: a merged point beside a straight road it belongs to is moved onto the road', () => {
+  // A-C: a straight road; B, 15 m off it, was merged from a junction 3 m off the road
+  const make = (extra) => {
+    const pts = { a: [0, 0], c: [200, 0], b: [100, 15], d: [100, 120], ...extra };
+    const list = [['a', 'c'], ['b', 'c'], ['b', 'd']];
+    return metreGraph(pts, list);
+  };
+  const { nodes, edges, ll } = make();
+  const members = new Map([['b', [ll([100, 3]), ll([100, 27])]]]);
+  const out = SGM.alignPointsOntoRoads(nodes, edges, 30, members);
+  assert.strictEqual(out.applied.length, 1);
+  const b = out.nodes.get('b');
+  const kx = 111320 * Math.cos((35 * Math.PI) / 180);
+  assert.ok(Math.abs((b.lat - 35) * 110540) < 0.5 && Math.abs((b.lon - 135) * kx - 100) < 3.5, 'b sits on the road');
+  const pairs = out.edges.map((e) => [e.u, e.v].sort().join('-')).sort();
+  assert.deepStrictEqual(pairs, ['a-b', 'b-c', 'b-d']);
+  assert.ok(isConnected(out.nodes));
+  // Not when the new place would be closer than the merge radius to another point
+  const near = make({ k: [100, -25] });
+  const outNear = SGM.alignPointsOntoRoads(near.nodes, near.edges, 30, members);
+  assert.strictEqual(outNear.applied.length, 0);
+  // Not when no junction of b is on the road
+  const far = SGM.alignPointsOntoRoads(nodes, edges, 30, new Map([['b', [ll([100, 15])]]]));
+  assert.strictEqual(far.applied.length, 0);
+});
+
+test('sliver: Barcelona 36 (merge 30 m, dead ends excluded) keeps no point with a single road', async () => {
+  SGM.clearCaches();
+  SGM.setPresetFetcher(localPresetFetcher);
+  const b = await withFetch(noNetwork(), () =>
+    SGM.generateStreetGoBoard('バルセロナ アシャンプラ', { targetNodes: 36, mergeRadiusMeters: 30 }, null, { allowNetwork: false }));
+  for (const n of b.nodes.values()) assert.ok(n.neighbors.size >= 2, `${n.id} has ${n.neighbors.size} road(s)`);
+  SGM.clearCaches();
+});
+
+test('sliver: no move that makes a narrow angle at a point joined to the moved point', () => {
+  const { nodes, edges, ll } = metreGraph(
+    { a: [0, 0], c: [200, 0], b: [100, 15], d: [160, 60], e: [136.49, 27.64] },
+    [['a', 'c'], ['b', 'c'], ['b', 'd'], ['d', 'e']]
+  );
+  const members = new Map([['b', [ll([100, 3]), ll([100, 27])]]]);
+  const out = SGM.alignPointsOntoRoads(nodes, edges, 30, members);
+  assert.strictEqual(out.applied.length, 0, 'moving b would close the angle b-d-e from 17 to 9 degrees');
+});
+
+test('sliver: a point merged from one junction only is never moved', () => {
+  const { nodes, edges, ll } = metreGraph(
+    { a: [0, 0], c: [200, 0], b: [100, 15], d: [100, 120] },
+    [['a', 'c'], ['b', 'c'], ['b', 'd']]
+  );
+  const out = SGM.alignPointsOntoRoads(nodes, edges, 30, new Map([['b', [ll([100, 3])]]]));
+  assert.strictEqual(out.applied.length, 0);
+});
+
+test('shape: the last pass never brings back a crossing the current straight line does not have', () => {
+  // a-b is drawn straight now; its road course bends 20 m south and is crossed by e-f
+  const { nodes, edges, ll } = metreGraph(
+    { a: [0, 0], b: [100, 0], e: [50, -30], f: [50, -10] },
+    [['a', 'b'], ['e', 'f']]
+  );
+  edges[0].roadCoords = [ll([0, 0]), ll([50, -20]), ll([100, 0])];
+  assert.strictEqual(SGM.countEdgeCrossings(nodes, edges), 0);
+  const out = SGM.buildDisplayShapes(nodes, edges, null);
+  assert.strictEqual(out[0].coords.length, 2, 'the straight line stays');
+  assert.strictEqual(SGM.countEdgeCrossings(nodes, out), 0);
+});
+
+test('shape: a crossing that only the current line has is not lost by simplifying', () => {
+  // road (0,0)-(50,25)-(100,0) whose real ends lie at (0,25) and (100,25): drawn straight it
+  // would no longer cross the road (50,16)-(50,35)
+  const { nodes, edges, ll } = metreGraph(
+    { a: [0, 0], b: [100, 0], e: [50, 16], f: [50, 35] },
+    [['a', 'b', [[50, 25]]], ['e', 'f']]
+  );
+  edges[0].rawEnds = [ll([0, 25]), ll([100, 25])];
+  const before = SGM.countEdgeCrossings(nodes, edges);
+  assert.strictEqual(before, 1);
+  const out = SGM.buildDisplayShapes(nodes, edges, null);
+  assert.strictEqual(SGM.countEdgeCrossings(nodes, out), before, 'the same pairs cross');
+  assert.strictEqual(out[0].coords.length, 3);
+});
+
+test('shape: distances are true metres at high latitude (85 degrees north)', () => {
+  const lat0 = 85;
+  const kx = 111320 * Math.cos((lat0 * Math.PI) / 180);
+  const ll = ([x, y]) => [lat0 + y / 110540, 10 + x / kx];
+  const nodes = new Map();
+  for (const [id, p] of Object.entries({ a: [0, 0], b: [0, 100], k: [6, 50], z: [60, 50] })) {
+    const [lat, lon] = ll(p);
+    nodes.set(id, { id, lat, lon, neighbors: new Set() });
+  }
+  // a-b bends 3 m west in the middle; drawn straight it would pass 6 m from k
+  const edges = [{ u: 'a', v: 'b', coords: [ll([0, 0]), ll([-3, 50]), ll([0, 100])] }, { u: 'k', v: 'z', coords: [ll([6, 50]), ll([60, 50])] }];
+  const out = SGM.buildDisplayShapes(nodes, edges, null);
+  assert.strictEqual(out[0].coords.length, 3, 'kept: the straight line would pass within 8 m of k');
+});
+
+test('shape: a road with thousands of points is simplified without running out of stack', () => {
+  const pts = [];
+  for (let i = 0; i <= 6000; i++) pts.push([i * 2, (i % 2 ? 30 : 0) + i * 0.001]);
+  const { nodes, edges } = metreGraph({ a: pts[0], b: pts[pts.length - 1] }, [['a', 'b', pts.slice(1, -1)]]);
+  const out = SGM.buildDisplayShapes(nodes, edges, null);
+  assert.ok(out[0].coords.length >= 2);
+});
+
+test('margin: never past 450 points (a street row 6 m and 12 m beyond the square)', () => {
+  const xs = Array.from({ length: 19 }, (_, i) => (i - 9) * 40);
+  const ys = Array.from({ length: 21 }, (_, i) => (i - 10) * 40);
+  const rows = [-406].concat(ys, [406, 412]); // 6 m south, 6 m and 12 m north of the outer rows
+  const els = metreStreets(xs, rows);
+  const g = SGM.buildRoadGraph(els, 35, 135, { targetNodes: 399, mergeRadiusMeters: 5 });
+  assert.ok(g.stats.nodeCount <= SGM.MAX_BOARD_NODES, `${g.stats.nodeCount} points`);
+  assert.strictEqual(g.stats.marginM, 10);
+});
+
+test('margin: Ginza with 450 points wanted stays within 450', async () => {
+  SGM.clearCaches();
+  SGM.setPresetFetcher(localPresetFetcher);
+  const b = await withFetch(noNetwork(), () =>
+    SGM.generateStreetGoBoard('東京 銀座', { targetNodes: 450 }, null, { allowNetwork: false }));
+  assert.ok(b.stats.nodeCount <= 450, `${b.stats.nodeCount} points`);
+  SGM.clearCaches();
+});
+
+test('order: Kyoto 81/169/361 give the same board for reversed and shuffled input data', async () => {
+  const base = readPreset('presets/kyoto-shijo-karasuma.json');
+  const sig = (g) => JSON.stringify({
+    nodes: Array.from(g.nodes.values()).map((n) => `${n.id}:${n.lat.toFixed(7)},${n.lon.toFixed(7)}`).sort(),
+    edges: g.edges.map((e) => [e.u, e.v].sort().join('-')).sort()
+  });
+  for (const target of [81, 169, 361]) {
+    const sigs = [];
+    for (const mode of ['as is', 'reversed', 'shuffled']) {
+      const data = { ...base, elements: base.elements.slice() };
+      if (mode === 'reversed') data.elements.reverse();
+      if (mode === 'shuffled') {
+        const r = rng(7);
+        for (let i = data.elements.length - 1; i > 0; i--) {
+          const j = Math.floor(r() * (i + 1));
+          [data.elements[i], data.elements[j]] = [data.elements[j], data.elements[i]];
+        }
+      }
+      SGM.clearCaches();
+      SGM.setPresetFetcher(async () => data);
+      const g = await withFetch(noNetwork(), () =>
+        SGM.generateStreetGoBoard('京都 四条烏丸', { targetNodes: target }, null, { allowNetwork: false }));
+      sigs.push(sig(g));
+    }
+    assert.strictEqual(sigs[1], sigs[0], `${target}: reversed input`);
+    assert.strictEqual(sigs[2], sigs[0], `${target}: shuffled input`);
+  }
+  SGM.setPresetFetcher(localPresetFetcher);
+  SGM.clearCaches();
+});
+
+test('shape: a simpler line outside the board rectangle keeps the road course', () => {
+  const { nodes, edges, ll } = metreGraph({ a: [0, 0], b: [100, 0] }, [['a', 'b', [[50, -6]]]]);
+  const [south, west] = ll([-10, -10]);
+  const [north, east] = ll([90, 10]); // b lies outside
+  const out = SGM.buildDisplayShapes(nodes, edges, { south, west, north, east });
+  assert.strictEqual(out[0].coords.length, 3);
+  const [n2, e2] = ll([110, 10]);
+  assert.strictEqual(SGM.buildDisplayShapes(nodes, edges, { south, west, north: n2, east: e2 })[0].coords.length, 2);
+});
+
+// Street grid on rows / columns given in metres (one way per row and per column)
+function metreStreets(xs, ys) {
+  const kx = 111000 * Math.cos((35 * Math.PI) / 180);
+  const els = [];
+  const id = (i, j) => 1 + j * xs.length + i;
+  ys.forEach((y, j) => xs.forEach((x, i) => els.push({ type: 'node', id: id(i, j), lat: 35 + y / 111000, lon: 135 + x / kx })));
+  let w = 1;
+  ys.forEach((_, j) => els.push({ type: 'way', id: w++, nodes: xs.map((__, i) => id(i, j)) }));
+  xs.forEach((_, i) => els.push({ type: 'way', id: w++, nodes: ys.map((__, j) => id(i, j)) }));
+  return els;
+}
+
+test('margin: the auto square reaches 15 m past its outermost point unless the board grows past 1.15 x target', () => {
+  const xs = [-300, -200, -100, 0, 100, 200, 300];
+  const plain = metreStreets(xs, [-300, -200, -100, 0, 100, 200, 300]);
+  const g1 = SGM.buildRoadGraph(plain, 35, 135, { targetNodes: 9, mergeRadiusMeters: 5 });
+  assert.strictEqual(g1.stats.marginM, 15);
+  assert.strictEqual(g1.stats.nodeCount, 9);
+  // A street 12 m beyond the 9-point square: +15 m would give 12 points (> 1.15 x 9), +10 m gives 9
+  const extra = metreStreets(xs, [-300, -200, -100, 0, 100, 112, 200, 300]);
+  const g2 = SGM.buildRoadGraph(extra, 35, 135, { targetNodes: 9, mergeRadiusMeters: 5 });
+  assert.strictEqual(g2.stats.marginM, 10);
+  assert.strictEqual(g2.stats.nodeCount, 9);
+  // The margin never takes the corner past the data coverage
+  const g3 = SGM.buildRoadGraph(plain, 35, 135, { targetNodes: 9, mergeRadiusMeters: 5, coverageM: 101 * Math.SQRT2 + 0.5 });
+  assert.strictEqual(g3.stats.marginM, 1);
+  // A drawn rectangle is used as it is
+  const kx = 111000 * Math.cos((35 * Math.PI) / 180);
+  const b = { south: 35 - 150 / 111000, north: 35 + 150 / 111000, west: 135 - 150 / kx, east: 135 + 150 / kx };
+  const g4 = SGM.buildRoadGraph(plain, 35, 135, { targetNodes: 9, mergeRadiusMeters: 5, bounds: b });
+  assert.deepStrictEqual(g4.boardBounds, b);
+  assert.strictEqual(g4.stats.marginM, 0);
+});
+
+test('margin: presets x 36/81/169 stay within 0.85-1.15 x target where the plain square did', async () => {
+  SGM.clearCaches();
+  SGM.setPresetFetcher(localPresetFetcher);
+  await withFetch(noNetwork(), async () => {
+    for (const p of SGM.PRESETS) {
+      for (const target of [36, 81, 169]) {
+        const b = await SGM.generateStreetGoBoard(p.query, { targetNodes: target }, null, { allowNetwork: false });
+        const r = b.stats.nodeCount / target;
+        assert.ok(r >= 0.85 && r <= 1.15, `${p.query} ${target}: ${b.stats.nodeCount} points`);
+        const bb = b.boardBounds;
+        for (const n of b.nodes.values()) assert.ok(n.lat >= bb.south && n.lat <= bb.north && n.lon >= bb.west && n.lon <= bb.east);
+      }
+    }
+  });
   SGM.clearCaches();
 });
 

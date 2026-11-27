@@ -359,48 +359,14 @@
     boundaryLayer.clearLayers();
     if (!currentBoardData || currentBoardData.nodes.size === 0) return;
 
-    let rectRing;
-    if (currentBoardData.customBounds) {
-      const { south, west, north, east } = currentBoardData.customBounds;
-      rectRing = [
-        [north, west],
-        [north, east],
-        [south, east],
-        [south, west]
-      ];
-    } else {
-      let minLat = Infinity;
-      let maxLat = -Infinity;
-      let minLon = Infinity;
-      let maxLon = -Infinity;
-
-      for (const n of currentBoardData.nodes.values()) {
-        if (n.lat < minLat) minLat = n.lat;
-        if (n.lat > maxLat) maxLat = n.lat;
-        if (n.lon < minLon) minLon = n.lon;
-        if (n.lon > maxLon) maxLon = n.lon;
-      }
-      for (const e of currentBoardData.edges) {
-        for (const [lat, lon] of e.coords) {
-          if (lat < minLat) minLat = lat;
-          if (lat > maxLat) maxLat = lat;
-          if (lon < minLon) minLon = lon;
-          if (lon > maxLon) maxLon = lon;
-        }
-      }
-
-      const midLat = (minLat + maxLat) / 2;
-      const cosLat = Math.max(0.2, Math.cos((midLat * Math.PI) / 180));
-      const padLat = Math.max(22 / 111000, (maxLat - minLat) * 0.045);
-      const padLon = Math.max(22 / (111000 * cosLat), (maxLon - minLon) * 0.045);
-
-      rectRing = [
-        [maxLat + padLat, minLon - padLon],
-        [maxLat + padLat, maxLon + padLon],
-        [minLat - padLat, maxLon + padLon],
-        [minLat - padLat, minLon - padLon]
-      ];
-    }
+    const b = boardRect();
+    if (!b) return;
+    const rectRing = [
+      [b.north, b.west],
+      [b.north, b.east],
+      [b.south, b.east],
+      [b.south, b.west]
+    ];
 
     const isDark = mapStyleSelect.value === 'dark';
     const worldRing = [
@@ -440,6 +406,7 @@
     for (const edge of currentBoardData.edges) {
       const polyline = L.polyline(edge.coords, {
         ...baseStyle,
+        smoothFactor: 0, // draw the shape map-graph chose, without dropping small bends
         interactive: false
       }).addTo(edgeLayer);
       edgePolylines.push({
@@ -929,12 +896,63 @@
     return [[p, top], [p, Math.max(p, 44)]];
   }
 
+  function isRect(b) {
+    return !!b && [b.south, b.west, b.north, b.east].every(Number.isFinite) && b.north > b.south && b.east > b.west;
+  }
+
+  // The points and drawn roads of the board, with a margin of max(22 m, 4.5 %)
+  function paddedBoardExtent() {
+    let minLat = Infinity;
+    let maxLat = -Infinity;
+    let minLon = Infinity;
+    let maxLon = -Infinity;
+    for (const n of currentBoardData.nodes.values()) {
+      if (n.lat < minLat) minLat = n.lat;
+      if (n.lat > maxLat) maxLat = n.lat;
+      if (n.lon < minLon) minLon = n.lon;
+      if (n.lon > maxLon) maxLon = n.lon;
+    }
+    for (const e of currentBoardData.edges) {
+      for (const [lat, lon] of e.coords) {
+        if (lat < minLat) minLat = lat;
+        if (lat > maxLat) maxLat = lat;
+        if (lon < minLon) minLon = lon;
+        if (lon > maxLon) maxLon = lon;
+      }
+    }
+    if (!(maxLat >= minLat && maxLon >= minLon)) return null;
+    const midLat = (minLat + maxLat) / 2;
+    const cosLat = Math.max(0.2, Math.cos((midLat * Math.PI) / 180));
+    const padLat = Math.max(22 / 111000, (maxLat - minLat) * 0.045);
+    const padLon = Math.max(22 / (111000 * cosLat), (maxLon - minLon) * 0.045);
+    return { south: minLat - padLat, north: maxLat + padLat, west: minLon - padLon, east: maxLon + padLon };
+  }
+
+  // The board frame. A drawn range is the frame as drawn. Otherwise the frame is the board's
+  // points and roads with a small margin, cut to the square the board was made from
+  // (boardBounds): a road left out of the board never shows inside the frame, and empty
+  // parts of the square stay outside it.
+  function boardRect() {
+    if (!currentBoardData || currentBoardData.nodes.size === 0) return null;
+    if (isRect(currentBoardData.customBounds)) return currentBoardData.customBounds;
+    const ext = paddedBoardExtent();
+    const b = currentBoardData.boardBounds;
+    if (!isRect(b)) return ext;
+    if (!ext) return b;
+    const r = {
+      south: Math.max(ext.south, b.south),
+      north: Math.min(ext.north, b.north),
+      west: Math.max(ext.west, b.west),
+      east: Math.min(ext.east, b.east)
+    };
+    return isRect(r) ? r : b;
+  }
+
+  // Fit to the same rectangle the frame is drawn on, so the whole frame is on screen
   function boardLatLngBounds() {
     if (!currentBoardData) return null;
-    if (currentBoardData.customBounds) {
-      const b = currentBoardData.customBounds;
-      return L.latLngBounds([b.south, b.west], [b.north, b.east]);
-    }
+    const b = boardRect();
+    if (b) return L.latLngBounds([b.south, b.west], [b.north, b.east]);
     const latLngs = Array.from(currentBoardData.nodes.values()).map((n) => [n.lat, n.lon]);
     return latLngs.length > 0 ? L.latLngBounds(latLngs) : null;
   }

@@ -3,8 +3,8 @@
   font-style: normal;
   font-display: swap;
   font-weight: 300 600;
-  src: url("vendor/fonts/urbanist/urbanist-latin-wght-normal.woff2?v=12") format("woff2-variations"),
-       url("vendor/fonts/urbanist/urbanist-latin-wght-normal.woff2?v=12") format("woff2");
+  src: url("vendor/fonts/urbanist/urbanist-latin-wght-normal.woff2?v=13") format("woff2-variations"),
+       url("vendor/fonts/urbanist/urbanist-latin-wght-normal.woff2?v=13") format("woff2");
   unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
 }
 
@@ -115,14 +115,27 @@ select {
   flex-shrink: 0;
 }
 
-.brand-logo .stone-dot {
-  width: 24px;
-  height: 24px;
-  border: 1px solid var(--ink);
+.brand-logo .logo-mark {
+  display: block;
+  width: 37.5px;
+  height: 30px;
 }
 
-.brand-logo .stone-dot.white {
-  margin-left: -9px;
+.brand-logo .logo-pin {
+  fill: var(--ink);
+}
+
+.brand-logo .logo-stone {
+  fill: #fff;
+  stroke: var(--ink);
+  stroke-width: 1.5;
+}
+
+.brand-logo .logo-road {
+  fill: none;
+  stroke: var(--ink);
+  stroke-width: 1.5;
+  stroke-linecap: round;
 }
 
 .brand h1 {
@@ -1581,6 +1594,16 @@ input[type="checkbox"]:checked::after {
 }
 
 @media (forced-colors: active) {
+  .brand-logo .logo-pin {
+    fill: CanvasText;
+  }
+  .brand-logo .logo-stone {
+    fill: Canvas;
+    stroke: CanvasText;
+  }
+  .brand-logo .logo-road {
+    stroke: CanvasText;
+  }
   /* The dark-map selector too: its black-stone rule is more specific than #map .go-node */
   #map .go-node.stone-B,
   #map.map-style-dark .go-node.stone-B {
