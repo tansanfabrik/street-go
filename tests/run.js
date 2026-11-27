@@ -9,6 +9,9 @@ const assert = require('assert');
 const ROOT = path.join(__dirname, '..');
 const { GraphGoEngine, komiForNodeCount, humanColorForMode, isCpuTurn, undoStepsForActors } = require(path.join(ROOT, 'go-engine.js'));
 const SGM = require(path.join(ROOT, 'map-graph.js'));
+// Road requests: the retry after every server failed waits 5 ms here (10 s in the app)
+const TEST_NET_TIMINGS = { retryWaitMs: 5, minRequestMs: 0 };
+SGM.setNetworkTimings(TEST_NET_TIMINGS);
 
 // ---------------------------------------------------------------------------
 // Tiny harness
@@ -628,51 +631,102 @@ test('validateOverpassJson: remark, missing nodes, bad coordinates and huge resp
   assert.strictEqual(SGM.validateOverpassJson({ elements: gridElements(3, 35, 135, 1) }).cacheable, true);
 });
 
-test('Overpass endpoints: only the two allowed servers', () => {
-  assert.deepStrictEqual(SGM.OVERPASS_ENDPOINTS, [
-    'https://overpass-api.de/api/interpreter',
-    'https://overpass.private.coffee/api/interpreter'
-  ]);
+test('Overpass endpoints: only overpass-api.de (more are added one per line)', () => {
+  assert.deepStrictEqual(SGM.OVERPASS_ENDPOINTS, ['https://overpass-api.de/api/interpreter']);
+  const src = fs.readFileSync(path.join(ROOT, 'map-graph.js'), 'utf8');
+  assert.ok(!src.includes('private.coffee'), 'private.coffee is gone');
 });
 
-test('Overpass 429 / 504 stop immediately (no hammering of the next server)', async () => {
-  for (const status of [429, 504]) {
+// Run fn with a second (test) server after the real one, then restore the list
+async function withTwoServers(fn) {
+  const extra = 'https://overpass.test.invalid/api/interpreter';
+  SGM.OVERPASS_ENDPOINTS.push(extra);
+  try {
+    return await fn(SGM.OVERPASS_ENDPOINTS.slice());
+  } finally {
+    SGM.OVERPASS_ENDPOINTS.splice(SGM.OVERPASS_ENDPOINTS.indexOf(extra), 1);
+  }
+}
+
+test('Overpass: busy answers (429 / 502 / 503 / 504) go on to the next server; all failed: once more after a wait, then "busy"', async () => {
+  await withTwoServers(async (servers) => {
+    for (const status of [429, 502, 503, 504]) {
+      SGM.clearCaches();
+      const urls = [];
+      const msgs = [];
+      const err = await withFetch(async (url) => { urls.push(url); return jsonResponse(status, {}); }, () =>
+        rejectsKind(SGM.fetchOverpassRoads(35, 135, 300, { report: (m) => msgs.push(m) }), 'busy'));
+      assert.deepStrictEqual(urls, servers.concat(servers), `HTTP ${status}: in order, then the whole list once more`);
+      assert.ok(err.message.includes('混雑') && err.message.includes(`HTTP ${status}`), err.message);
+      assert.ok(msgs.some((m) => m.includes('別のサーバーに切り替えています')), msgs.join('|'));
+      assert.ok(msgs.some((m) => m.includes('もう一度試します')), msgs.join('|'));
+    }
+    // a busy first server, a good second one: its data, cached
+    SGM.clearCaches();
+    const urls = [];
+    const els = gridElements(3, 35, 135, 1);
+    const got = await withFetch(async (url) => {
+      urls.push(url);
+      return urls.length === 1 ? jsonResponse(429, {}) : jsonResponse(200, { elements: els });
+    }, () => SGM.fetchOverpassRoads(35, 135, 300));
+    assert.strictEqual(got.length, els.length);
+    assert.deepStrictEqual(urls, servers);
+    assert.ok(SGM.findCachedRoads(35, 135, 300));
+  });
+  SGM.clearCaches();
+});
+
+test('Overpass: timeouts, failed connections and other 5xx go on too ("network"); other 4xx stop at once', async () => {
+  await withTwoServers(async (servers) => {
     SGM.clearCaches();
     let calls = 0;
-    await withFetch(async () => { calls++; return jsonResponse(status, {}); }, () =>
-      rejectsKind(SGM.fetchOverpassRoads(35, 135, 300), 'busy')
-    );
-    assert.strictEqual(calls, 1, `HTTP ${status} should not try another endpoint`);
-  }
+    let err = await withFetch(async () => { calls++; throw new TypeError('Failed to fetch'); }, () =>
+      rejectsKind(SGM.fetchOverpassRoads(35, 135, 300), 'network'));
+    assert.strictEqual(calls, 2 * servers.length);
+    assert.ok(/通信エラー: 接続エラー/.test(err.message), err.message);
+    // a server that never answers: given up after perServerMs
+    SGM.setNetworkTimings({ ...TEST_NET_TIMINGS, perServerMs: 30 });
+    calls = 0;
+    const hang = (url, opts) => new Promise((resolve, reject) => {
+      calls++;
+      opts.signal.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })));
+    });
+    err = await withFetch(hang, () => rejectsKind(SGM.fetchOverpassRoads(35, 135, 300), 'network'));
+    assert.strictEqual(calls, 2 * servers.length);
+    assert.ok(/通信エラー: タイムアウト/.test(err.message), err.message);
+    SGM.setNetworkTimings(TEST_NET_TIMINGS);
+    calls = 0;
+    await withFetch(async () => { calls++; return jsonResponse(500, {}); }, () => rejectsKind(SGM.fetchOverpassRoads(35, 135, 300), 'network'));
+    assert.strictEqual(calls, 2 * servers.length);
+    calls = 0;
+    await withFetch(async () => { calls++; return jsonResponse(400, {}); }, () => rejectsKind(SGM.fetchOverpassRoads(35, 135, 300), 'network'));
+    assert.strictEqual(calls, 1, 'a refused query is not sent again');
+  });
+  SGM.clearCaches();
 });
 
-test('Overpass network failure / 5xx switch to the next endpoint', async () => {
+test('Overpass: no second round without time for the wait; a cancel during the wait sends nothing more', async () => {
+  // the whole generation has 100 s (here 50 ms): no time for the wait -> one round only
   SGM.clearCaches();
-  const urls = [];
-  const els = gridElements(3, 35, 135, 1);
-  const got = await withFetch(async (url) => {
-    urls.push(url);
-    if (urls.length === 1) return jsonResponse(502, {});
-    return jsonResponse(200, { elements: els });
-  }, () => SGM.fetchOverpassRoads(35, 135, 300));
-  assert.strictEqual(got.length, els.length);
-  assert.deepStrictEqual(urls, SGM.OVERPASS_ENDPOINTS);
-
-  SGM.clearCaches();
+  SGM.setNetworkTimings({ ...TEST_NET_TIMINGS, totalMs: 50, retryWaitMs: 100, minRequestMs: 1 });
   let calls = 0;
-  const err = await withFetch(async () => { calls++; throw new TypeError('Failed to fetch'); }, () =>
-    rejectsKind(SGM.fetchOverpassRoads(35, 135, 300), 'network')
-  );
-  assert.strictEqual(calls, 2);
-  assert.ok(/通信エラー/.test(err.message));
-
-  // other 4xx: no retry on the other server
-  SGM.clearCaches();
+  await withFetch(async () => { calls++; return jsonResponse(429, {}); }, () => rejectsKind(SGM.fetchOverpassRoads(35, 135, 300), 'busy'));
+  assert.strictEqual(calls, SGM.OVERPASS_ENDPOINTS.length);
+  // a cancel while waiting for the second round
+  SGM.setNetworkTimings({ ...TEST_NET_TIMINGS, retryWaitMs: 300 });
   calls = 0;
-  await withFetch(async () => { calls++; return jsonResponse(400, {}); }, () =>
-    rejectsKind(SGM.fetchOverpassRoads(35, 135, 300), 'network')
-  );
-  assert.strictEqual(calls, 1);
+  const ac = new AbortController();
+  const msgs = [];
+  const p = withFetch(async () => { calls++; return jsonResponse(504, {}); }, () =>
+    rejectsKind(SGM.fetchOverpassRoads(35, 135, 300, { signal: ac.signal, report: (m) => msgs.push(m) }), 'aborted'));
+  await new Promise((r) => setTimeout(r, 50));
+  assert.ok(msgs.some((m) => m.includes('10秒') || m.includes('秒後にもう一度試します')), msgs.join('|'));
+  ac.abort();
+  await p;
+  await new Promise((r) => setTimeout(r, 350));
+  assert.strictEqual(calls, SGM.OVERPASS_ENDPOINTS.length, 'nothing sent after the cancel');
+  SGM.setNetworkTimings(TEST_NET_TIMINGS);
+  SGM.clearCaches();
 });
 
 test('incomplete Overpass responses are not cached and make no board; good ones are cached', async () => {
@@ -982,7 +1036,7 @@ test('presets with footpaths enabled: geocode from bundle, roads from Overpass',
     urls.push(url);
     return jsonResponse(429, {});
   }, () => rejectsKind(SGM.generateStreetGoBoard('東京 銀座', { targetNodes: 81, includeFootways: true }), 'busy'));
-  assert.strictEqual(urls.length, 1);
+  assert.strictEqual(urls.length, 2 * SGM.OVERPASS_ENDPOINTS.length);
   assert.ok(urls[0].includes('overpass'), 'no Nominatim request for a preset name');
   SGM.clearCaches();
 });
@@ -1078,10 +1132,27 @@ function assertBoardInvariants(g, b, label) {
   assert.ok(g.stats.coverage.rateRoads >= 0.75, `${label}: coverage ${g.stats.coverage.rateRoads}`);
 }
 
-test('bundled presets x 36/81/169 with default settings: valid boards inside their square', async () => {
+// The 33 boards made from a place's name (11 bundled places x 36/81/169 points, default
+// settings): points and the roads joining them, as saved before the drawn-range search and the
+// rectangle requests came in (tests/preset-boards.json). They must not change.
+function placeBoardSignature(g) {
+  const key = (n) => `${n.lat.toFixed(7)},${n.lon.toFixed(7)}`;
+  const points = Array.from(g.nodes.values()).map(key).sort();
+  const idx = new Map(points.map((k, i) => [k, i]));
+  const edges = g.edges.map((e) => {
+    const a = idx.get(key(g.nodes.get(e.u)));
+    const b = idx.get(key(g.nodes.get(e.v)));
+    return a < b ? [a, b] : [b, a];
+  }).sort((x, y) => x[0] - y[0] || x[1] - y[1]);
+  return { points, edges };
+}
+const PLACE_BOARDS = JSON.parse(fs.readFileSync(path.join(__dirname, 'preset-boards.json'), 'utf8'));
+
+test('bundled presets x 36/81/169 with default settings: valid boards inside their square, unchanged points and roads', async () => {
   SGM.clearCaches();
   SGM.setPresetFetcher(localPresetFetcher);
   assert.strictEqual(SGM.PRESETS.length, 11);
+  assert.strictEqual(Object.keys(PLACE_BOARDS).length, 33);
   await withFetch(noNetwork(), async () => {
     for (const p of SGM.PRESETS) {
       const data = JSON.parse(fs.readFileSync(path.join(ROOT, p.file), 'utf8'));
@@ -1096,6 +1167,12 @@ test('bundled presets x 36/81/169 with default settings: valid boards inside the
         // the roads are cut to a square around the place
         const sz = SGM.rectSizeMeters(b.boardBounds);
         assert.ok(Math.abs(sz.widthM - sz.heightM) < 0.01 * sz.widthM, `${label}: ${sz.widthM} x ${sz.heightM}`);
+        const saved = PLACE_BOARDS[`${p.file.replace('presets/', '').replace('.json', '')} ${target}`];
+        assert.ok(saved, `${label}: no saved board`);
+        const now = placeBoardSignature(b);
+        assert.strictEqual(now.points.length, saved.points.length, `${label}: number of points`);
+        assert.deepStrictEqual(now.points, saved.points, `${label}: points moved`);
+        assert.deepStrictEqual(now.edges, saved.edges, `${label}: roads changed`);
       }
     }
     // Offline initial board even if a large size was restored by the browser
@@ -1318,16 +1395,33 @@ test('rect: landscape and portrait rectangles on bundled data make valid boards 
     for (const [w, h] of [[600, 300], [300, 600]]) {
       const label = `${name} ${w}x${h}`;
       const b = rectAround(d.location.lat, d.location.lon, w, h);
-      const g = await withFetch(noNetwork(), () => SGM.generateStreetGoBoardInBounds(b, {}, null, {}));
-      assertBoardInvariants(g, b, label);
-      assert.deepStrictEqual(g.customBounds, b, `${label}: the frame is the drawn rectangle`);
-      assert.deepStrictEqual(g.boardBounds, b, `${label}: roads are cut at the drawn rectangle`);
-      const size = SGM.rectSizeMeters(g.customBounds);
+      const g = await withFetch(noNetwork(), () => SGM.generateStreetGoBoardInBounds(b, {}, null, { allowNetwork: false }));
+      // roads cut to the drawn rectangle with its sides moved (at most 150 m each way)
+      assertBoardInvariants(g, g.boardBounds, label);
+      assert.deepStrictEqual(g.cutBounds, g.boardBounds);
+      assertSidesMoved(g.boardBounds, b, g.stats.fit.maxShiftM, label);
+      assert.deepStrictEqual(g.drawnBounds, b, `${label}: the range as drawn is kept`);
+      assert.deepStrictEqual(g.customBounds, b);
+      // the frame shown holds everything and lies within the rectangle the roads were cut to
+      assertBoardInside(g, g.frameBounds, `${label} (frame)`);
+      assertSidesMoved(g.frameBounds, g.boardBounds, 0, `${label} (frame)`, true);
+      const size = SGM.rectSizeMeters(g.frameBounds);
       assert.ok(w > h ? size.widthM > size.heightM : size.heightM > size.widthM, `${label}: frame orientation`);
     }
   }
   SGM.clearCaches();
 });
+
+// Each side of `a` lies within maxM of the same side of `b` (inside: `a` within `b`)
+function assertSidesMoved(a, b, maxM, label, inside = false) {
+  const k = 111195 * Math.cos((((b.south + b.north) / 2) * Math.PI) / 180);
+  const moved = { west: (b.west - a.west) * k, east: (a.east - b.east) * k, south: (b.south - a.south) * 111195, north: (a.north - b.north) * 111195 };
+  for (const [side, m] of Object.entries(moved)) {
+    if (inside) assert.ok(m <= 1e-6, `${label}: ${side} side ${m.toFixed(1)} m outside`);
+    else assert.ok(Math.abs(m) <= maxM + 1, `${label}: ${side} side moved ${m.toFixed(1)} m`);
+  }
+  return moved;
+}
 
 function boardSignature(g) {
   return {
@@ -1353,7 +1447,7 @@ test('rect: a 400 m square passed as a rectangle gives the same board as the squ
 test('rect: size limits (short side on screen, long side on the ground, aspect ratio) at the boundaries', () => {
   const c = (widthM, heightM, widthPx, heightPx) => SGM.checkDrawnRect({ widthM, heightM, widthPx, heightPx });
   assert.strictEqual(SGM.MIN_DRAW_SIDE_PX, 15);
-  assert.strictEqual(SGM.MAX_DRAW_SIDE_M, 4000);
+  assert.strictEqual(SGM.MAX_DRAW_SIDE_M, 20000);
   assert.strictEqual(SGM.MAX_DRAW_ASPECT, 6);
   // aspect ratio: 1:6 is fine, anything thinner is not (both orientations)
   assert.ok(c(600, 100, 600, 100).ok);
@@ -1374,16 +1468,17 @@ test('rect: size limits (short side on screen, long side on the ground, aspect r
   assert.strictEqual(c(140, 10, 14, 1).message, 'もう少し大きくドラッグして範囲を引いてください');
   // order: too small -> too large -> too thin
   assert.strictEqual(c(1000, 100, 100, 10).kind, 'too-small', '100 x 10 px is too small (not too thin)');
-  assert.strictEqual(c(10000, 100, 1000, 10).kind, 'too-small');
-  assert.strictEqual(c(10000, 100, 1000, 15).kind, 'too-large');
+  assert.strictEqual(c(30000, 100, 1000, 10).kind, 'too-small');
+  assert.strictEqual(c(30000, 100, 1000, 15).kind, 'too-large');
   assert.strictEqual(c(700, 100, 70, 15).kind, 'too-thin');
-  // longer side on the ground: 4000 m is fine, more is too large
-  assert.ok(c(4000, 4000, 400, 400).ok);
-  assert.ok(c(4000, 1000).ok); // metres only (no pixel checks)
-  assert.strictEqual(c(4000.1, 1000).kind, 'too-large');
-  assert.strictEqual(c(1000, 4000.1).kind, 'too-large');
-  assert.ok(/一辺 4km 以内の範囲/.test(c(4000.1, 1000).message));
-  assert.ok(!/正方形/.test(c(4000.1, 1000).message));
+  // longer side on the ground: 20 km is fine, more is too large
+  assert.ok(c(20000, 20000, 400, 400).ok);
+  assert.ok(c(20000, 4000).ok); // metres only (no pixel checks)
+  assert.ok(c(4000.1, 1000).ok, 'more than 4 km: major roads only, no longer refused');
+  assert.strictEqual(c(20000.1, 4000).kind, 'too-large');
+  assert.strictEqual(c(4000, 20000.1).kind, 'too-large');
+  assert.ok(/一辺 20km 以内の範囲/.test(c(20000.1, 4000).message));
+  assert.ok(!/正方形/.test(c(20000.1, 4000).message));
 });
 
 test('rect: generation rejects too thin / too large rectangles before any request', async () => {
@@ -1391,13 +1486,39 @@ test('rect: generation rejects too thin / too large rectangles before any reques
   await withFetch(noNetwork(), async () => {
     const thin = await rejectsKind(SGM.generateStreetGoBoardInBounds(rectAround(35, 135, 700, 100), {}, null, {}), 'area');
     assert.ok(/細長すぎます/.test(thin.message));
-    const wide = await rejectsKind(SGM.generateStreetGoBoardInBounds(rectAround(35, 135, 4100, 1000), {}, null, {}), 'area');
+    const wide = await rejectsKind(SGM.generateStreetGoBoardInBounds(rectAround(35, 135, 20100, 5000), {}, null, {}), 'area');
     assert.ok(/広すぎます/.test(wide.message));
-    // the radius cap of the request still applies on its own
-    const huge = await rejectsKind(SGM.generateStreetGoBoardInBounds(rectAround(35, 135, 5000, 5000), {}, null, {}), 'area');
+    // the cap on the distance from the centre to the corners applies on its own
+    const huge = await rejectsKind(SGM.generateStreetGoBoardInBounds(rectAround(35, 135, 25000, 25000), {}, null, {}), 'area');
     assert.strictEqual(huge.message, wide.message);
+    assert.ok(SGM.rectCoverCircle(rectAround(35, 135, 20000, 20000)).halfDiagM <= SGM.MAX_DRAW_HALF_DIAG_M);
+    // 8 km and 20 km pass the checks (offline here: they stop for want of data instead)
+    for (const side of [8000, 19990]) {
+      const r = rectAround(35, 135, side * 111000 / 111195, side * 111000 / 111195);
+      const sz = SGM.rectSizeMeters(r);
+      assert.ok(Math.max(sz.widthM, sz.heightM) <= 20000 && Math.max(sz.widthM, sz.heightM) >= side - 20, JSON.stringify(sz));
+      await rejectsKind(SGM.generateStreetGoBoardInBounds(r, {}, null, { allowNetwork: false }), 'offline');
+    }
   });
 });
+
+// The request body asks for the rectangle `b` grown by growM on every side (rounded outwards)
+function assertRequestRect(body, b, growM) {
+  assert.ok(!body.includes('around:'), body);
+  const m = /\(([-\d.]+),([-\d.]+),([-\d.]+),([-\d.]+)\);/.exec(body);
+  assert.ok(m, body);
+  const [s0, w0, n0, e0] = m.slice(1).map(Number);
+  const midLat = (b.south + b.north) / 2;
+  const midLon = (b.west + b.east) / 2;
+  const grown = [
+    SGM.distanceMeters(s0, midLon, b.south, midLon),
+    SGM.distanceMeters(n0, midLon, b.north, midLon),
+    SGM.distanceMeters(midLat, w0, midLat, b.west),
+    SGM.distanceMeters(midLat, e0, midLat, b.east)
+  ];
+  for (const g of grown) assert.ok(g >= growM - 0.5 && g <= growM + 1, `grown by ${g.toFixed(2)} m, not ${growM} m`);
+  assert.ok(s0 < b.south && n0 > b.north && w0 < b.west && e0 > b.east);
+}
 
 test('rect: the Overpass circle covers the rectangle (centre, half diagonal + 60 m, at least 120 m)', async () => {
   for (const [w, h] of [[600, 300], [300, 600], [400, 400], [3000, 800]]) {
@@ -1428,12 +1549,9 @@ test('rect: the Overpass circle covers the rectangle (centre, half diagonal + 60
     bodies.push(decodeURIComponent(init.body.replace(/^data=/, '')));
     return jsonResponse(200, { elements: gridElements(5, 35.0985, 135.1975, 1) });
   }, () => SGM.generateStreetGoBoardInBounds(b, { mergeRadiusMeters: 5 }, null, {}));
+  // one request: the rectangle grown by the sides' reach (150 m) and the margin (60 m)
   assert.strictEqual(bodies.length, 1);
-  const m = /around:(\d+),([\d.]+),([\d.]+)\)/.exec(bodies[0]);
-  assert.ok(m, bodies[0]);
-  const circle = SGM.rectCoverCircle(b);
-  assert.strictEqual(Number(m[1]), circle.radiusM);
-  assert.ok(Math.abs(Number(m[2]) - 35.1) < 1e-9 && Math.abs(Number(m[3]) - 135.2) < 1e-9);
+  assertRequestRect(bodies[0], b, SGM.FIT_SHIFT_M + SGM.DRAW_FETCH_MARGIN_M);
   SGM.clearCaches();
 });
 
@@ -1453,7 +1571,14 @@ test('rect: data at hand is used when its circle holds the rectangle corners (+6
     () => SGM.generateStreetGoBoardInBounds(b, {}, null, { allowNetwork: false }));
   assert.strictEqual(calls, 0);
   assert.ok(g.stats.nodeCount >= 9, `${g.stats.nodeCount} points`);
-  assertBoardInside(g, b, 'kyoto north');
+  assertBoardInside(g, g.boardBounds, 'kyoto north');
+  // offline, only rectangles the bundle holds were tried
+  assert.ok(SGM.findCachedRoadsForRect(g.boardBounds, 'simple'), 'the moved rectangle lies within the bundle');
+  // online too: the bundle holds the range as drawn (not + 210 m) and gives a board -> no request
+  const gOn = await withFetch(async (url) => { calls++; throw new Error(`unexpected network access: ${url}`); },
+    () => SGM.generateStreetGoBoardInBounds(b, {}, null, {}));
+  assert.strictEqual(calls, 0);
+  assert.deepStrictEqual(boardSignature(gOn), boardSignature(g));
   // A corner outside the bundle's circle (1000 x 600 m: ~1346 m) -> one Overpass request
   const b2 = rectAround(d.location.lat + north, d.location.lon, 1000, 600);
   assert.strictEqual(SGM.findCachedRoadsForRect(b2, 'simple'), null);
@@ -1463,7 +1588,7 @@ test('rect: data at hand is used when its circle holds the rectangle corners (+6
     return jsonResponse(200, { elements: d.elements });
   }, () => SGM.generateStreetGoBoardInBounds(b2, {}, null, {}));
   assert.strictEqual(bodies.length, 1);
-  assert.ok(bodies[0].includes(`around:${SGM.rectCoverCircle(b2).radiusM},`));
+  assertRequestRect(bodies[0], b2, SGM.FIT_SHIFT_M + SGM.DRAW_FETCH_MARGIN_M);
   // Offline, the same rectangle is refused instead of requested
   SGM.clearCaches();
   seedPresetRoads('kyoto-shijo-karasuma');
@@ -1577,7 +1702,7 @@ test('F5/F10: preset JSON is versioned, must be roadMode "simple", and never nee
   await withFetch(async (url) => { urls.push(url); return jsonResponse(429, {}); },
     () => rejectsKind(SGM.generateStreetGoBoard('東京 銀座', { targetNodes: 81 }), 'busy'));
   assert.ok(requested[0].endsWith(`.json?v=${SGM.ASSET_VERSION}`), requested[0]);
-  assert.strictEqual(urls.length, 1);
+  assert.strictEqual(urls.length, 2 * SGM.OVERPASS_ENDPOINTS.length, 'every server, then once more');
   assert.ok(urls[0].includes('overpass'));
   assert.ok(SGM.findCachedRoads(35.6712, 139.765, 300) === null, 'old bundle must not be registered');
 
@@ -1587,7 +1712,7 @@ test('F5/F10: preset JSON is versioned, must be roadMode "simple", and never nee
   urls = [];
   await withFetch(async (url) => { urls.push(url); return jsonResponse(429, {}); },
     () => rejectsKind(SGM.generateStreetGoBoard('札幌 大通公園', { targetNodes: 81 }), 'busy'));
-  assert.strictEqual(urls.length, 1);
+  assert.strictEqual(urls.length, 2 * SGM.OVERPASS_ENDPOINTS.length);
   assert.ok(!urls.some((u) => u.includes('nominatim')));
 
   // 3. offline initial board with a broken bundle -> clear error, no request
@@ -2374,8 +2499,10 @@ const KYOTO_EW = { '六角通': [135.7641, 135.7649], '蛸薬師通': [135.7545,
 
 test('Kyoto range: every stretch of Rokkaku, Shinmachi, Karasuma, Higashinotoin, Takakura, Sakaimachi and Takoyakushi between their junctions stays (S15)', async () => {
   SGM.clearCaches();
+  // (the board built for the roads cut to this rectangle: a drawn range moves its sides first,
+  // see the fit tests)
   const data = seedPresetRoads('kyoto-shijo-karasuma');
-  const g = await withFetch(noNetwork(), () => SGM.generateStreetGoBoardInBounds(KYOTO_RANGE, {}, null, { allowNetwork: false }));
+  const g = SGM.buildRoadGraph(data.elements, 0, 0, { bounds: KYOTO_RANGE });
   assertBoardInvariants(g, KYOTO_RANGE, 'kyoto range');
   const P = metresProjector(35.006, 135.76);
   for (const [name, ids] of Object.entries(KYOTO_STREETS)) {
@@ -2417,9 +2544,15 @@ test('Kyoto range: every stretch of Rokkaku, Shinmachi, Karasuma, Higashinotoin,
   // same board for reversed input data
   SGM.clearCaches();
   const rev = { ...data, elements: data.elements.slice().reverse() };
-  SGM.seedRoadCache(rev.location.lat, rev.location.lon, rev.radius, rev.elements, true, 'simple');
-  const g2 = await withFetch(noNetwork(), () => SGM.generateStreetGoBoardInBounds(KYOTO_RANGE, {}, null, { allowNetwork: false }));
+  const g2 = SGM.buildRoadGraph(rev.elements, 0, 0, { bounds: KYOTO_RANGE });
   assert.deepStrictEqual(boardSignature(g2), boardSignature(g));
+  // the drawn range itself: the same for reversed input data too
+  SGM.seedRoadCache(rev.location.lat, rev.location.lon, rev.radius, rev.elements, true, 'simple');
+  const d1 = await withFetch(noNetwork(), () => SGM.generateStreetGoBoardInBounds(KYOTO_RANGE, {}, null, { allowNetwork: false }));
+  SGM.clearCaches();
+  seedPresetRoads('kyoto-shijo-karasuma');
+  const d2 = await withFetch(noNetwork(), () => SGM.generateStreetGoBoardInBounds(KYOTO_RANGE, {}, null, { allowNetwork: false }));
+  assert.deepStrictEqual(boardSignature(d1), boardSignature(d2));
   SGM.clearCaches();
 });
 
@@ -3204,7 +3337,16 @@ test('I5: the first road request for a place covers the square the search picks 
     return jsonResponse(200, { elements: d.elements });
   }, () => SGM.generateStreetGoBoard('テスト用の地名', { targetNodes: 81 }, null, {}));
   assert.strictEqual(bodies.length, 1, 'one Overpass request');
-  assert.ok(bodies[0].includes('around:855,'), bodies[0]);
+  // the rectangle holding the circle of 855 m around the place (no "around" search)
+  assert.strictEqual(bodies[0], `data=${SGM.buildOverpassQuery(d.location.lat, d.location.lon, 855, 'simple')}`);
+  const bb = /\(([-\d.]+),([-\d.]+),([-\d.]+),([-\d.]+)\);/.exec(bodies[0]);
+  assert.ok(bb && !bodies[0].includes('around:'), bodies[0]);
+  const [s0, w0, n0, e0] = bb.slice(1).map(Number);
+  const { lat, lon } = d.location;
+  for (const [la, lo] of [[s0, lon], [n0, lon], [lat, w0], [lat, e0]]) {
+    const m = SGM.distanceMeters(lat, lon, la, lo);
+    assert.ok(m >= 855 && m <= 855 * 1.01 + 2, `side ${m} m from the centre`);
+  }
   SGM.clearCaches();
 });
 
@@ -3373,6 +3515,616 @@ test('cancel: a board build stops at the next step; the time of the worst preset
   assert.throws(() => SGM.buildRoadGraph(big.els, 35, 135, { mergeRadiusMeters: 5, bounds: { south: 34.999, north: 35.03, west: 134.999, east: 135.04 } }),
     (err) => err.kind === 'too-many' && /範囲を狭めてください/.test(err.message));
   SGM.clearCaches();
+});
+
+// ---------------------------------------------------------------------------
+// Drawn ranges: sides moved to the nearest ring of roads (A), small boards (B), the requests
+// and their cache (C), wide ranges with major roads only (D)
+
+// Distance (m) of the board's outline (its bounding rectangle) from each drawn side
+function outlineSideDev(g, b) {
+  const k = 111195 * Math.cos((((b.south + b.north) / 2) * Math.PI) / 180);
+  let s = Infinity;
+  let n = -Infinity;
+  let w = Infinity;
+  let e = -Infinity;
+  for (const [la, lo] of g.outline) {
+    s = Math.min(s, la);
+    n = Math.max(n, la);
+    w = Math.min(w, lo);
+    e = Math.max(e, lo);
+  }
+  return { west: Math.abs(w - b.west) * k, east: Math.abs(e - b.east) * k, south: Math.abs(s - b.south) * 111195, north: Math.abs(n - b.north) * 111195 };
+}
+const sumDev = (d) => d.west + d.east + d.south + d.north;
+
+test('fit A: Kyoto 500 m square: more points, the outline within 150 m of each drawn side, the frame holds the board', async () => {
+  SGM.clearCaches();
+  const d = seedPresetRoads('kyoto-shijo-karasuma');
+  const b = squareAround(d.location.lat, d.location.lon, 500);
+  const asDrawn = SGM.buildRoadGraph(d.elements, 0, 0, { bounds: b });
+  const g = await withFetch(noNetwork(), () => SGM.generateStreetGoBoardInBounds(b, {}, null, { allowNetwork: false }));
+  assert.ok(g.stats.nodeCount > asDrawn.nodes.size, `${g.stats.nodeCount} points, ${asDrawn.nodes.size} as drawn`);
+  assert.ok(g.outline, 'a ring of roads is the outline');
+  const dev = outlineSideDev(g, b);
+  for (const [side, m] of Object.entries(dev)) assert.ok(m <= 150, `${side}: outline ${m.toFixed(0)} m from the drawn side`);
+  assert.ok(sumDev(dev) < sumDev(outlineSideDev(asDrawn, b)), 'nearer than the board cut as drawn');
+  assert.ok(Math.abs(sumDev(dev) - g.stats.fit.deviationM.total) <= 2, JSON.stringify(g.stats.fit));
+  assertSidesMoved(g.boardBounds, b, SGM.FIT_SHIFT_M, 'kyoto 500');
+  assertBoardInvariants(g, g.boardBounds, 'kyoto 500');
+  assertBoardInside(g, g.frameBounds, 'kyoto 500 (frame)');
+  assert.deepStrictEqual(g.drawnBounds, b);
+  assert.ok(g.stats.fit.builds >= 2 && g.stats.fit.builds <= SGM.FIT_MAX_BUILDS);
+  // the same range gives the same board
+  const again = await withFetch(noNetwork(), () => SGM.generateStreetGoBoardInBounds(b, {}, null, { allowNetwork: false }));
+  assert.deepStrictEqual(boardSignature(again), boardSignature(g));
+  assert.deepStrictEqual(again.boardBounds, g.boardBounds);
+  SGM.clearCaches();
+});
+
+test('fit A: a 200 m range 250 m north of Shijo-Karasuma (no board as drawn) makes a board of 9 points or more', async () => {
+  SGM.clearCaches();
+  const d = seedPresetRoads('kyoto-shijo-karasuma');
+  const b = squareAround(d.location.lat + 250 / 111000, d.location.lon, 200);
+  const asDrawn = SGM.buildRoadGraph(d.elements, 0, 0, { bounds: b });
+  assert.ok(asDrawn.nodes.size < 9, `${asDrawn.nodes.size} points as drawn`);
+  const g = await withFetch(noNetwork(), () => SGM.generateStreetGoBoardInBounds(b, {}, null, { allowNetwork: false }));
+  assert.ok(g.stats.nodeCount >= 9 && g.outline);
+  assertSidesMoved(g.boardBounds, b, g.stats.fit.maxShiftM, 'kyoto 200');
+  SGM.clearCaches();
+});
+
+test('fit A: sides already just outside a ring of roads stay where they are (the range as drawn is a candidate)', async () => {
+  SGM.clearCaches();
+  const grid = meterGrid(9, 100, 35, 135); // lines every 100 m, 800 m across
+  SGM.seedRoadCache(grid.center[0], grid.center[1], 3000, grid.els, false);
+  // 10 m outside the lines 200 m from the centre: the outline is 10 m from each side
+  const dLat = 210 / 111195;
+  const dLon = 210 / (111195 * Math.cos((grid.center[0] * Math.PI) / 180));
+  const b = { south: grid.center[0] - dLat, north: grid.center[0] + dLat, west: grid.center[1] - dLon, east: grid.center[1] + dLon };
+  const g = await withFetch(noNetwork(), () => SGM.generateStreetGoBoardInBounds(b, { mergeRadiusMeters: 5 }, null, { allowNetwork: false }));
+  assert.deepStrictEqual(g.stats.fit.offsets, { west: 0, east: 0, south: 0, north: 0 });
+  assert.deepStrictEqual(g.boardBounds, b);
+  assert.strictEqual(g.stats.nodeCount, SGM.buildRoadGraph(grid.els, 0, 0, { bounds: b, mergeRadiusMeters: 5 }).nodes.size);
+  for (const m of Object.values(outlineSideDev(g, b))) assert.ok(Math.abs(m - 10) < 1, String(m));
+  SGM.clearCaches();
+});
+
+test('fit A: the search stops at its time limit with the best board so far (the first two builds always run)', async () => {
+  SGM.clearCaches();
+  const d = seedPresetRoads('kyoto-shijo-karasuma');
+  const b = squareAround(d.location.lat, d.location.lon, 500);
+  const full = await withFetch(noNetwork(), () => SGM.generateStreetGoBoardInBounds(b, {}, null, { allowNetwork: false }));
+  assert.ok(full.stats.fit.builds > 2, `${full.stats.fit.builds} builds`);
+  const quick = await withFetch(noNetwork(), () => SGM.generateStreetGoBoardInBounds(b, {}, null, { allowNetwork: false, fitMaxMs: 0 }));
+  assert.strictEqual(quick.stats.fit.builds, 2);
+  assert.strictEqual(quick.stats.fit.stopped, true);
+  assert.ok(quick.stats.nodeCount >= 9);
+  assert.strictEqual(SGM.FIT_MAX_MS, 1500);
+  assert.strictEqual(SGM.FIT_MAX_BUILDS, 40);
+  SGM.clearCaches();
+});
+
+test('fit A: worst time of a drawn range on dense data (every side free to move) stays under 1.6 s', async () => {
+  // the bundled data registered as covering everything: no rectangle is ruled out
+  let worst = 0;
+  let worstAt = '';
+  for (const name of ['nagoya-sakae', 'melbourne-cbd', 'tokyo-ginza']) {
+    const d = readPreset(`presets/${name}.json`);
+    for (const side of [1200, 2000]) {
+      SGM.clearCaches();
+      SGM.seedRoadCache(d.location.lat, d.location.lon, 50000, d.elements, true, 'simple');
+      const b = squareAround(d.location.lat, d.location.lon, side);
+      const t0 = Date.now();
+      try {
+        await withFetch(noNetwork(), () => SGM.generateStreetGoBoardInBounds(b, {}, null, { allowNetwork: false }));
+      } catch (err) {
+        if (err.kind !== 'too-many') throw err;
+      }
+      const ms = Date.now() - t0;
+      if (ms > worst) {
+        worst = ms;
+        worstAt = `${name} ${side}`;
+      }
+    }
+  }
+  assert.ok(worst < 1600, `${worst} ms (${worstAt})`);
+  SGM.clearCaches();
+});
+
+// A square ring of roads (side m metres) around (lat, lon) with a 30 m dead end into it from
+// the middle of each side: 4 junctions + 4 dead ends = 8 points
+function ringWithSpurs(lat, lon, m) {
+  const ky = 111195;
+  const kx = 111195 * Math.cos((lat * Math.PI) / 180);
+  const at = (x, y) => ({ lat: lat + y / ky, lon: lon + x / kx });
+  const h = m / 2;
+  const pts = [[-h, -h], [0, -h], [h, -h], [h, 0], [h, h], [0, h], [-h, h], [-h, 0]];
+  const els = pts.map(([x, y], i) => ({ type: 'node', id: i + 1, ...at(x, y) }));
+  // (four ways, one per side: a single closed way with four corners would be taken for the
+  // outline of an area)
+  [[1, 2, 3], [3, 4, 5], [5, 6, 7], [7, 8, 1]].forEach((nodes, i) => els.push({ type: 'way', id: 1 + 20 * i, nodes }));
+  [[2, 0, -h + 30], [4, h - 30, 0], [6, 0, h - 30], [8, -h + 30, 0]].forEach(([from, x, y], i) => {
+    els.push({ type: 'node', id: 100 + i, ...at(x, y) });
+    els.push({ type: 'way', id: 10 + i, nodes: [from, 100 + i] });
+  });
+  return els;
+}
+
+test('fit B: only a board of 4-8 points with an outline: offered with a question (kind small-board, the board attached)', async () => {
+  SGM.clearCaches();
+  const els = ringWithSpurs(35, 135, 160);
+  SGM.seedRoadCache(35, 135, 3000, els, false);
+  const b = squareAround(35, 135, 200);
+  const err = await withFetch(noNetwork(), () => rejectsKind(SGM.generateStreetGoBoardInBounds(b, {}, null, { allowNetwork: false }), 'small-board'));
+  assert.ok(err.board && err.board.outline, 'the board comes with the question');
+  assert.strictEqual(err.board.stats.nodeCount, 8);
+  assert.strictEqual(err.message, '8点の小さな盤です。この盤で始めますか？');
+  assert.ok([SGM.FIT_SHIFT_M, SGM.FIT_SHIFT_WIDE_M].includes(err.board.stats.fit.maxShiftM));
+  assertBoardInside(err.board, err.board.frameBounds, 'small board');
+  assert.strictEqual(SGM.SMALL_BOARD_MIN_NODES, 4);
+  // the place boards keep 9 as their least
+  assert.throws(() => SGM.assertPlayableBoard(8), (e) => e.kind === 'too-few');
+  SGM.clearCaches();
+});
+
+test('fit: data at hand first; a request only when it gives no board (small boards included)', async () => {
+  // 1. a small board from the data at hand: used (asked about) without any request, although
+  //    the data does not reach as far as the wider search could move the sides
+  SGM.clearCaches();
+  SGM.seedRoadCache(35, 135, 215, ringWithSpurs(35, 135, 160), false);
+  const b = squareAround(35, 135, 200);
+  const e = await withFetch(noNetwork(), () => rejectsKind(SGM.generateStreetGoBoardInBounds(b, {}, null, {}), 'small-board'));
+  assert.strictEqual(e.board.stats.nodeCount, 8);
+  // 2. no board from the data at hand: one request for the range + 300 m + 60 m, searched again
+  SGM.clearCaches();
+  const b2 = squareAround(35, 135, 300);
+  SGM.seedRoadCache(35, 135, 290, [{ type: 'node', id: 1, lat: 35, lon: 135 }, { type: 'node', id: 2, lat: 35.001, lon: 135 }, { type: 'way', id: 1, nodes: [1, 2] }], false);
+  const bodies = [];
+  const g = await withFetch(async (url, init) => {
+    bodies.push(decodeURIComponent(init.body));
+    return jsonResponse(200, { elements: centredGrid(15, 100, 35, 135) });
+  }, () => SGM.generateStreetGoBoardInBounds(b2, {}, null, {}));
+  assert.strictEqual(bodies.length, 1);
+  assertRequestRect(bodies[0], b2, SGM.FIT_SHIFT_WIDE_M + SGM.DRAW_FETCH_MARGIN_M);
+  assert.ok(g.stats.nodeCount >= 9 && g.outline);
+  // offline, the same range stops with the error of the data at hand
+  SGM.clearCaches();
+  SGM.seedRoadCache(35, 135, 290, [{ type: 'node', id: 1, lat: 35, lon: 135 }, { type: 'node', id: 2, lat: 35.001, lon: 135 }, { type: 'way', id: 1, nodes: [1, 2] }], false);
+  await withFetch(noNetwork(), () => rejectsKind(SGM.generateStreetGoBoardInBounds(b2, {}, null, { allowNetwork: false }), 'too-few'));
+  SGM.clearCaches();
+});
+
+test('fit: side positions are on a grid of 25 m x lenScale within +-shift', () => {
+  assert.deepStrictEqual(SGM.sidePositions([], 150).slice().sort((x, y) => x - y), [0]);
+  const p = SGM.sidePositions([-40, 30], 150);
+  assert.ok(p.every((o) => o % 25 === 0 && Math.abs(o) <= 150), p.join(','));
+  const q = SGM.sidePositions([-90, 70], 400, 2);
+  assert.ok(q.every((o) => Math.abs(o / 50 - Math.round(o / 50)) < 1e-9 && Math.abs(o) <= 400), q.join(','));
+  // the line 70 m out is kept by the first position at least 15 m x 2 beyond it
+  assert.strictEqual(q[0], 100);
+});
+
+test('fit B: fewer than 4 points or no ring: an error with the number of points', async () => {
+  SGM.clearCaches();
+  // a 2 x 2 grid: one ring without junctions
+  SGM.seedRoadCache(35.0, 135.0, 1000, gridElements(2, 35.0, 135.0, 1), false);
+  const e1 = await withFetch(noNetwork(), () => rejectsKind(SGM.generateStreetGoBoardInBounds({ south: 34.999, north: 35.002, west: 134.999, east: 135.002 }, { mergeRadiusMeters: 5 }, null, { allowNetwork: false }), 'too-few'));
+  assert.ok(/^交点が少なすぎます\(\d点\)。範囲を広げるか別の場所を選んでください$/.test(e1.message), e1.message);
+  // a plus-shaped tree of roads: points enough, but no ring for an outline
+  SGM.clearCaches();
+  const ky = 111195;
+  const kx = 111195 * Math.cos((35 * Math.PI) / 180);
+  const els = [{ type: 'node', id: 1, lat: 35, lon: 135 }];
+  let id = 2;
+  for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+    const ids = [1];
+    for (let k = 1; k <= 3; k++) {
+      els.push({ type: 'node', id, lat: 35 + (dy * k * 60) / ky, lon: 135 + (dx * k * 60) / kx });
+      // a short side branch at every node, so that each is a junction
+      els.push({ type: 'node', id: id + 1000, lat: 35 + (dy * k * 60 + dx * 20) / ky, lon: 135 + (dx * k * 60 + dy * 20) / kx });
+      els.push({ type: 'way', id: id + 1000, nodes: [id, id + 1000] });
+      ids.push(id++);
+    }
+    els.push({ type: 'way', id: id++, nodes: ids });
+  }
+  SGM.seedRoadCache(35, 135, 3000, els, false);
+  const e2 = await withFetch(noNetwork(), () => rejectsKind(SGM.generateStreetGoBoardInBounds(squareAround(35, 135, 300), { mergeRadiusMeters: 5 }, null, { allowNetwork: false }), 'too-few'));
+  assert.ok(/^道が輪になる所がなく、盤の外周をつくれません\(\d+点\)。範囲を広げるか別の場所を選んでください$/.test(e2.message), e2.message);
+  assert.ok(Number(/\((\d+)点\)/.exec(e2.message)[1]) >= 9, e2.message);
+  SGM.clearCaches();
+});
+
+test('fit B: no board within 150 m: the sides move up to 300 m (offline: the data at hand; online: one more request)', async () => {
+  // lines every 220 m; a 150 m range in the middle of a block: within 150 m only the block's
+  // own ring (4 points); within 300 m the next lines too (16 points)
+  const grid = meterGrid(8, 220, 35, 135);
+  const [lat, lon] = [35 + (3.5 * 220) / 111195, 135 + (3.5 * 220) / (111195 * Math.cos((35 * Math.PI) / 180))];
+  const b = squareAround(lat, lon, 150);
+  SGM.clearCaches();
+  SGM.seedRoadCache(lat, lon, 3000, grid.els, false);
+  const g = await withFetch(noNetwork(), () => SGM.generateStreetGoBoardInBounds(b, { mergeRadiusMeters: 5 }, null, { allowNetwork: false }));
+  assert.strictEqual(g.stats.fit.maxShiftM, SGM.FIT_SHIFT_WIDE_M);
+  assert.ok(g.stats.nodeCount >= 9, `${g.stats.nodeCount} points`);
+  assertSidesMoved(g.boardBounds, b, SGM.FIT_SHIFT_WIDE_M, 'grid 220');
+  // online: the first request reaches 150 m + 60 m, the second 300 m + 60 m
+  SGM.clearCaches();
+  const bodies = [];
+  const g2 = await withFetch(async (url, init) => {
+    bodies.push(decodeURIComponent(init.body));
+    return jsonResponse(200, { elements: grid.els });
+  }, () => SGM.generateStreetGoBoardInBounds(b, { mergeRadiusMeters: 5 }, null, {}));
+  assert.strictEqual(bodies.length, 2);
+  assertRequestRect(bodies[0], b, SGM.FIT_SHIFT_M + SGM.DRAW_FETCH_MARGIN_M);
+  assertRequestRect(bodies[1], b, SGM.FIT_SHIFT_WIDE_M + SGM.DRAW_FETCH_MARGIN_M);
+  assert.deepStrictEqual(boardSignature(g2), boardSignature(g));
+  SGM.clearCaches();
+});
+
+// Road mode of a request body (which filter it carries)
+function modeOfBody(body) {
+  if (body.includes('"^(motorway|trunk|primary|secondary|tertiary)(_link)?$"')) return 'tertiary';
+  if (body.includes('"^(motorway|trunk|primary|secondary)(_link)?$"')) return 'secondary';
+  if (body.includes('"^(motorway|trunk|primary)(_link)?$"')) return 'primary';
+  return body.includes('bridleway') ? 'simple' : 'all';
+}
+
+// Grid of lines every spacingM metres, n x n, centred on (lat, lon)
+function centredGrid(n, spacingM, lat, lon, idBase = 1) {
+  const kx = 111195 * Math.cos((lat * Math.PI) / 180);
+  const half = ((n - 1) / 2) * spacingM;
+  const g = meterGrid(n, spacingM, lat - half / 111195, lon - half / kx);
+  if (idBase === 1) return g.els;
+  return g.els.map((e) => (e.type === 'node' ? { ...e, id: e.id + idBase } : { ...e, id: e.id + idBase, nodes: e.nodes.map((x) => x + idBase) }));
+}
+
+test('road modes D: by the longer side (4 km: every road; 10 km: tertiary and larger; beyond: secondary and larger); footpaths only up to 4 km', () => {
+  assert.strictEqual(SGM.drawRoadMode(4000, false), 'simple');
+  assert.strictEqual(SGM.drawRoadMode(4000, true), 'all');
+  assert.strictEqual(SGM.drawRoadMode(4000.1, true), 'tertiary');
+  assert.strictEqual(SGM.drawRoadMode(10000, false), 'tertiary');
+  assert.strictEqual(SGM.drawRoadMode(10000.1, false), 'secondary');
+  assert.strictEqual(SGM.drawRoadMode(20000, false), 'secondary');
+  const q = (mode) => SGM.buildOverpassBboxQuery({ south: 35, west: 135, north: 35.1, east: 135.1 }, mode);
+  assert.strictEqual(modeOfBody(q('tertiary')), 'tertiary');
+  assert.strictEqual(modeOfBody(q('secondary')), 'secondary');
+  assert.strictEqual(modeOfBody(q('primary')), 'primary');
+  for (const mode of ['tertiary', 'secondary', 'primary']) {
+    assert.ok(q(mode).includes('(_link)?') && q(mode).includes('(if: !is_tag("tunnel") || t["tunnel"] == "no")'), mode);
+    assert.ok(q(mode).includes('(35,135,35.1,135.1);'), 'a rectangle, south-west-north-east');
+  }
+  assert.ok(!q('secondary').includes('tertiary') && !q('primary').includes('secondary'));
+  // unknown modes fall back to the usual query; known ones are kept apart
+  assert.strictEqual(SGM.normalizeRoadMode('xyz'), 'simple');
+  for (const m of ['simple', 'all', 'tertiary', 'secondary', 'primary']) assert.strictEqual(SGM.normalizeRoadMode(m), m);
+});
+
+test('road modes D: 8 km and 20 km ranges are made from major roads, with a larger merge radius', async () => {
+  for (const [side, mode, r] of [[8000, 'tertiary', 64], [19900, 'secondary', 80]]) {
+    SGM.clearCaches();
+    const spacing = side / 8;
+    // pairs of north-south roads 50 m apart: one point each at the larger merge radius
+    const els = centredGrid(11, spacing, 35, 135).concat(centredGrid(11, spacing, 35, 135 + 50 / (111195 * Math.cos((35 * Math.PI) / 180)), 100000)
+      .filter((e) => e.type === 'node' || e.id - 100000 > 11)); // (its north-south lines only)
+    const bodies = [];
+    const msgs = [];
+    const b = squareAround(35, 135, side);
+    const g = await withFetch(async (url, init) => {
+      bodies.push(decodeURIComponent(init.body));
+      return jsonResponse(200, { elements: els });
+    }, () => SGM.generateStreetGoBoardInBounds(b, {}, (m) => msgs.push(m), {}));
+    assert.deepStrictEqual(bodies.map(modeOfBody), [mode], `${side}`);
+    // the sides move up to 150 m x lenScale; the request margin grows the same way
+    assert.ok(Math.abs(g.stats.fit.maxShiftM - SGM.FIT_SHIFT_M * g.stats.lenScale) < 1e-6, String(g.stats.fit.maxShiftM));
+    assertRequestRect(bodies[0], b, (SGM.FIT_SHIFT_M + SGM.DRAW_FETCH_MARGIN_M) * g.stats.lenScale);
+    assertSidesMoved(g.boardBounds, b, g.stats.fit.maxShiftM, `${side} m`);
+    assert.strictEqual(g.stats.roadMode, mode);
+    assert.ok(Math.abs(g.stats.mergeRadiusM - r) < 0.5, `${g.stats.mergeRadiusM}`);
+    assert.ok(Math.abs(g.stats.lenScale - g.stats.mergeRadiusM / 30) < 1e-9);
+    assert.ok(g.stats.notices.some((t) => t.includes('大通りだけ')), g.stats.notices.join('|'));
+    assert.ok(msgs.some((m) => m.includes('大通り')), msgs.join('|'));
+    let near = Infinity;
+    const pts = Array.from(g.nodes.values());
+    for (let i = 0; i < pts.length; i++) for (let j = i + 1; j < pts.length; j++) near = Math.min(near, SGM.distanceMeters(pts[i].lat, pts[i].lon, pts[j].lat, pts[j].lon));
+    assert.ok(near > 50, `points ${near.toFixed(0)} m apart: the 50 m pairs are merged`);
+    assertBoardInvariants(g, g.boardBounds, `${side} m`);
+  }
+  // up to 4 km: the setting as it is
+  SGM.clearCaches();
+  const d = seedPresetRoads('kyoto-shijo-karasuma');
+  const g = await withFetch(noNetwork(), () => SGM.generateStreetGoBoardInBounds(squareAround(d.location.lat, d.location.lon, 600), {}, null, { allowNetwork: false }));
+  assert.strictEqual(g.stats.mergeRadiusM, 30);
+  assert.strictEqual(g.stats.lenScale, 1);
+  assert.strictEqual(g.stats.roadMode, 'simple');
+  assert.deepStrictEqual(g.stats.notices, []);
+  SGM.clearCaches();
+});
+
+test('road modes D: more than 450 points (or too much data): made again from the next road kinds; the last one is not sent twice', async () => {
+  const b = squareAround(35, 135, 8000);
+  const dense = centredGrid(35, 240, 35, 135); // ~1000 points in the range
+  const sparse = centredGrid(11, 1000, 35, 135);
+  // 1. too many points with tertiary roads -> secondary
+  SGM.clearCaches();
+  let modes = [];
+  const msgs = [];
+  const g = await withFetch(async (url, init) => {
+    const m = modeOfBody(decodeURIComponent(init.body));
+    modes.push(m);
+    return jsonResponse(200, { elements: m === 'tertiary' ? dense : sparse });
+  }, () => SGM.generateStreetGoBoardInBounds(b, {}, (m) => msgs.push(m), {}));
+  assert.deepStrictEqual(modes, ['tertiary', 'secondary']);
+  assert.strictEqual(g.stats.roadMode, 'secondary');
+  assert.ok(g.stats.notices.some((t) => t.includes('交点が多すぎたため')), g.stats.notices.join('|'));
+  assert.ok(msgs.some((m) => m.includes('つくり直しています')), msgs.join('|'));
+  // 2. a response over the element limit -> the next road kinds too
+  SGM.clearCaches();
+  modes = [];
+  const huge = new Array(SGM.MAX_OVERPASS_ELEMENTS + 1).fill({ type: 'node', id: 1, lat: 35, lon: 135 });
+  const g2 = await withFetch(async (url, init) => {
+    const m = modeOfBody(decodeURIComponent(init.body));
+    modes.push(m);
+    return jsonResponse(200, { elements: m === 'tertiary' ? huge : sparse });
+  }, () => SGM.generateStreetGoBoardInBounds(b, {}, null, {}));
+  assert.deepStrictEqual(modes, ['tertiary', 'secondary']);
+  assert.strictEqual(g2.stats.roadMode, 'secondary');
+  // 3. 20 km: secondary, then primary, then an error; nothing sent twice
+  SGM.clearCaches();
+  modes = [];
+  const err = await withFetch(async (url, init) => {
+    modes.push(modeOfBody(decodeURIComponent(init.body)));
+    return jsonResponse(200, { elements: centredGrid(45, 440, 35, 135) });
+  }, () => rejectsKind(SGM.generateStreetGoBoardInBounds(squareAround(35, 135, 19900), {}, null, {}), 'too-many'));
+  assert.deepStrictEqual(modes, ['secondary', 'primary']);
+  assert.ok(/多すぎます.*範囲を狭めてください$/.test(err.message), err.message);
+  // 4. offline: no stricter data at hand -> the error at once
+  SGM.clearCaches();
+  SGM.seedRoadCache(35, 135, 3000, centredGrid(31, 60, 35, 135), false);
+  await withFetch(noNetwork(), () => rejectsKind(SGM.generateStreetGoBoardInBounds(squareAround(35, 135, 1700), { mergeRadiusMeters: 5 }, null, { allowNetwork: false }), 'too-many'));
+  SGM.clearCaches();
+});
+
+test('cache C: the query (road kinds, footpaths) is part of the key; requests are rectangles; switching modes back and forth', async () => {
+  SGM.clearCaches();
+  const coarse = centredGrid(11, 1000, 35, 135);
+  const fine = centredGrid(21, 100, 35, 135);
+  const modes = [];
+  const stub = async (url, init) => {
+    const m = modeOfBody(decodeURIComponent(init.body));
+    modes.push(m);
+    return jsonResponse(200, { elements: m === 'tertiary' ? coarse : fine });
+  };
+  const big = squareAround(35, 135, 8000);
+  const small = squareAround(35, 135, 600);
+  await withFetch(stub, async () => {
+    const g1 = await SGM.generateStreetGoBoardInBounds(big, {}, null, {});
+    assert.strictEqual(g1.stats.roadMode, 'tertiary');
+    // the major-road data never stands in for a small range
+    const g2 = await SGM.generateStreetGoBoardInBounds(small, {}, null, {});
+    assert.strictEqual(g2.stats.roadMode, 'simple');
+    assert.ok(g2.stats.nodeCount > 9);
+    await SGM.generateStreetGoBoardInBounds(small, { includeFootways: true }, null, {});
+    await SGM.generateStreetGoBoardInBounds(small, {}, null, {});
+    await SGM.generateStreetGoBoardInBounds(big, {}, null, {});
+    await SGM.generateStreetGoBoardInBounds(small, { includeFootways: true }, null, {});
+  });
+  assert.deepStrictEqual(modes, ['tertiary', 'simple', 'all']);
+  // a place request cached as a rectangle serves the circle it holds, not a larger one
+  SGM.clearCaches();
+  let calls = 0;
+  await withFetch(async () => { calls++; return jsonResponse(200, { elements: fine }); }, async () => {
+    await SGM.fetchOverpassRoads(35, 135, 400);
+    await SGM.fetchOverpassRoads(35, 135, 400);
+    await SGM.fetchOverpassRoads(35.001, 135, 300);
+  });
+  assert.strictEqual(calls, 1);
+  assert.strictEqual(SGM.findCachedRoads(35, 135, 500), null);
+  SGM.clearCaches();
+});
+
+test('app: the frame shown is frameBounds; a small board is asked about; the size label says "major roads only"; the notes name the server', () => {
+  const app = fs.readFileSync(path.join(ROOT, 'app.js'), 'utf8');
+  const br = /function boardRect\(\) \{([\s\S]*?)\n  \}/.exec(app)[1];
+  assert.ok(br.indexOf('frameBounds') >= 0 && br.indexOf('frameBounds') < br.indexOf('customBounds'), 'frameBounds first');
+  assert.ok(/err\.kind === 'small-board'[\s\S]{0,200}window\.confirm\(err\.message\)[\s\S]{0,80}applyGeneratedBoard\(err\.board/.test(app));
+  assert.ok(app.includes("'・大通りのみ'") && app.includes('DRAW_SIMPLE_MAX_M'));
+  assert.ok(/flashDrawnRect\(boardData\.drawnBounds\)/.test(app) && app.includes('}, 600);'));
+  const html = fs.readFileSync(path.join(ROOT, 'index.html'), 'utf8');
+  assert.ok(!html.includes('private.coffee'));
+  assert.ok(html.includes('Overpass API（overpass-api.de）') && html.includes('長方形の座標'));
+  for (const s of ['近くの道の輪', '大通りだけ', '小さな盤']) assert.ok(html.includes(s), s);
+});
+
+// ---------------------------------------------------------------------------
+// Score view: blocks (faces) of the board and who holds them (board-faces.js)
+
+const BF = require(path.join(ROOT, 'board-faces.js'));
+
+// Board from points { id: [x, y] } (about 100 m per unit both ways near Kyoto) and links [u, v] or
+// [u, v, [[x, y], ...] (bends between u and v)]; coords run u -> v unless `reversed` lists the link
+function faceBoard(points, links, reversed = []) {
+  const ll = ([x, y]) => [35 + y * 0.0009, 135.75 + x * 0.0011];
+  const nodes = new Map();
+  for (const [id, p] of Object.entries(points)) {
+    const [lat, lon] = ll(p);
+    nodes.set(id, { id, lat, lon, neighbors: new Set() });
+  }
+  const edges = links.map(([u, v, bends = []], i) => {
+    nodes.get(u).neighbors.add(v);
+    nodes.get(v).neighbors.add(u);
+    let coords = [points[u], ...bends, points[v]].map(ll);
+    if (reversed.includes(i)) coords = coords.reverse();
+    return { u, v, coords };
+  });
+  return { nodes, edges };
+}
+
+function gridFaceBoard(n) {
+  const points = {};
+  const links = [];
+  for (let y = 0; y < n; y++) for (let x = 0; x < n; x++) points[`${x},${y}`] = [x, y];
+  for (let y = 0; y < n; y++) {
+    for (let x = 0; x < n; x++) {
+      if (x + 1 < n) links.push([`${x},${y}`, `${x + 1},${y}`]);
+      if (y + 1 < n) links.push([`${x},${y}`, `${x},${y + 1}`]);
+    }
+  }
+  return faceBoard(points, links);
+}
+
+const sortedIds = (ids) => ids.slice().sort();
+
+test('faces: a 3 x 3 grid of points has 4 blocks; the outside is left out', () => {
+  const b = gridFaceBoard(3);
+  const r = BF.computeBoardFaces(b);
+  assert.strictEqual(r.faces.length, 4);
+  assert.strictEqual(r.components, 1);
+  assert.strictEqual(r.outerFaces, 1);
+  assert.strictEqual(r.faces.length, r.edgeCount - r.nodeCount + r.components);
+  const got = r.faces.map((f) => sortedIds(f.nodes).join(' ')).sort();
+  assert.deepStrictEqual(got, [
+    '0,0 0,1 1,0 1,1',
+    '0,1 0,2 1,1 1,2',
+    '1,0 1,1 2,0 2,1',
+    '1,1 1,2 2,1 2,2'
+  ]);
+  for (const f of r.faces) {
+    assert.ok(f.area > 0, 'blocks run counter-clockwise');
+    assert.strictEqual(f.edges.length, 4);
+    assert.strictEqual(f.ring.length, 4);
+    // about 100 m x 100 m
+    assert.ok(Math.abs(f.area - 100 * 100) < 0.02 * 100 * 100, `${f.area}`);
+  }
+});
+
+test('faces: coordinates stored v -> u, bends and a road leaving along another give the same blocks', () => {
+  // a square with a diagonal; the diagonal's coordinates run backwards
+  const sq = faceBoard({ a: [0, 0], b: [1, 0], c: [1, 1], d: [0, 1] },
+    [['a', 'b'], ['b', 'c'], ['c', 'd'], ['d', 'a'], ['a', 'c']], [4]);
+  const r1 = BF.computeBoardFaces(sq);
+  assert.deepStrictEqual(r1.faces.map((f) => sortedIds(f.nodes).join('')).sort(), ['abc', 'acd']);
+  // two roads from `o` drawn on top of each other for 40 m before they part: still planar
+  const together = faceBoard({ o: [0, 0], p: [2, 1], q: [2, -1], r: [-1, 0] },
+    [['o', 'p', [[0.4, 0]]], ['o', 'q', [[0.4, 0]]], ['p', 'q'], ['p', 'r'], ['q', 'r'], ['o', 'r']]);
+  const r2 = BF.computeBoardFaces(together);
+  assert.strictEqual(r2.faces.length, r2.edgeCount - r2.nodeCount + r2.components);
+  assert.deepStrictEqual(r2.faces.map((f) => sortedIds(f.nodes).join('')).sort(), ['opq', 'opr', 'oqr']);
+  for (const f of r2.faces) assert.ok(f.area > 0);
+});
+
+test('faces: a T junction and a dead-end branch sit on the boundary of their block', () => {
+  // square a b c d; a dead end from b into the square (b - e - f), and a T junction g on
+  // c - d with a dead end g - h into the square
+  const b = faceBoard(
+    { a: [0, 0], b: [2, 0], c: [2, 2], d: [0, 2], e: [1.5, 0.5], f: [1, 0.8], g: [1, 2], h: [1, 1.4] },
+    [['a', 'b'], ['b', 'c'], ['c', 'g'], ['g', 'd'], ['d', 'a'], ['b', 'e'], ['e', 'f'], ['g', 'h']]
+  );
+  const r = BF.computeBoardFaces(b);
+  assert.strictEqual(r.faces.length, 1); // 8 edges - 8 points + 1
+  const f = r.faces[0];
+  assert.deepStrictEqual(sortedIds(f.nodes), ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h']);
+  assert.strictEqual(f.edges.length, 8);
+  // the branches are walked out and back: they add no area
+  assert.ok(Math.abs(f.area - 4 * 100 * 100) < 0.02 * 4 * 100 * 100, `${f.area}`);
+  // a board that is only a tree has no block
+  const tree = faceBoard({ a: [0, 0], b: [1, 0], c: [2, 0], d: [1, 1] }, [['a', 'b'], ['b', 'c'], ['b', 'd']]);
+  const rt = BF.computeBoardFaces(tree);
+  assert.strictEqual(rt.faces.length, 0);
+  assert.strictEqual(rt.outerFaces, 1);
+});
+
+test('faces: two separate parts each lose their own outside', () => {
+  const pts = {};
+  const links = [];
+  // part 1: 3 x 3 grid at x 0..2; part 2: a triangle at x 5..6 with a branch
+  const g = gridFaceBoard(3);
+  for (const [id, n] of g.nodes) pts[id] = [Math.round((n.lon - 135.75) / 0.0011), Math.round((n.lat - 35) / 0.0009)];
+  for (const e of g.edges) links.push([e.u, e.v]);
+  Object.assign(pts, { t1: [5, 0], t2: [6, 0], t3: [5.5, 1], t4: [7, 0] });
+  links.push(['t1', 't2'], ['t2', 't3'], ['t3', 't1'], ['t2', 't4']);
+  pts.lonely = [9, 9]; // a point without roads
+  const b = faceBoard(pts, links);
+  const r = BF.computeBoardFaces(b);
+  assert.strictEqual(r.components, 2);
+  assert.strictEqual(r.outerFaces, 2);
+  assert.strictEqual(r.faces.length, 5);
+  assert.strictEqual(r.faces.length, r.edgeCount - r.nodeCount + r.components);
+  assert.ok(r.faces.some((f) => sortedIds(f.nodes).join(' ') === 't1 t2 t3'));
+  assert.ok(r.faces.every((f) => !f.nodes.includes('t4') && !f.nodes.includes('lonely')));
+  // empty / odd input
+  assert.strictEqual(BF.computeBoardFaces(null).faces.length, 0);
+  assert.strictEqual(BF.computeBoardFaces({ nodes: new Map(), edges: [] }).faces.length, 0);
+  assert.strictEqual(BF.computeBoardFaces({ nodes: b.nodes, edges: [{ u: 't1', v: 'missing', coords: [] }] }).faces.length, 0);
+});
+
+test('territory owners: only the block whose points are all Black (stones or territory) is Black', () => {
+  const b = gridFaceBoard(3);
+  const { faces } = BF.computeBoardFaces(b);
+  const stones = new Map(Array.from(b.nodes.keys(), (id) => [id, null]));
+  // Black on 0,0 1,0 0,1; Black's territory 1,1 (as engine.computeScore would mark it);
+  // White on 2,2; the rest empty and nobody's
+  for (const id of ['0,0', '1,0', '0,1']) stones.set(id, 'B');
+  stones.set('2,2', 'W');
+  const territory = new Map([['1,1', 'B']]);
+  const { faceOwners, edgeOwners } = BF.territoryOwners(faces, b.edges, stones, territory);
+  const byNodes = new Map(faces.map((f, i) => [sortedIds(f.nodes).join(' '), faceOwners[i]]));
+  assert.strictEqual(byNodes.get('0,0 0,1 1,0 1,1'), 'B');
+  assert.strictEqual(byNodes.get('1,0 1,1 2,0 2,1'), null);
+  assert.strictEqual(byNodes.get('0,1 0,2 1,1 1,2'), null);
+  assert.strictEqual(byNodes.get('1,1 1,2 2,1 2,2'), null);
+  const ownedEdges = b.edges.filter((e, i) => edgeOwners[i] === 'B').map((e) => sortedIds([e.u, e.v]).join('-')).sort();
+  assert.deepStrictEqual(ownedEdges, ['0,0-0,1', '0,0-1,0', '0,1-1,1', '1,0-1,1']);
+  assert.ok(edgeOwners.every((o) => o !== 'W'));
+  // a block of Black and White points belongs to nobody
+  assert.strictEqual(BF.ownerOfPoints(['0,0', '2,2'], stones, territory), null);
+  assert.strictEqual(BF.ownerOfPoints(['2,2'], stones, territory), 'W');
+  assert.strictEqual(BF.ownerOfPoints([], stones, territory), null);
+  // all White: White
+  const allW = new Map(Array.from(b.nodes.keys(), (id) => [id, 'W']));
+  assert.ok(BF.territoryOwners(faces, b.edges, allW, new Map()).faceOwners.every((o) => o === 'W'));
+});
+
+test('faces on bundled presets: Kyoto (default settings) has edges - points + parts blocks; every board works', async () => {
+  SGM.clearCaches();
+  SGM.setPresetFetcher(localPresetFetcher);
+  await withFetch(noNetwork(), async () => {
+    const kyoto = await SGM.generateStreetGoBoard('京都 四条烏丸', {}, null, { allowNetwork: false });
+    const r = BF.computeBoardFaces(kyoto);
+    assert.strictEqual(r.edgeCount, kyoto.edges.length);
+    assert.strictEqual(r.nodeCount, kyoto.nodes.size);
+    assert.strictEqual(r.faces.length, kyoto.edges.length - kyoto.nodes.size + r.components);
+    assert.ok(r.faces.every((f) => f.area > 0 && f.ring.length >= 3));
+    // every road lies on two sides of blocks / the outside: each edge is walked twice in all
+    for (const p of SGM.PRESETS) {
+      for (const target of [81, 361]) {
+        const b = await SGM.generateStreetGoBoard(p.query, { targetNodes: target }, null, { allowNetwork: false });
+        const t0 = Date.now();
+        const rf = BF.computeBoardFaces(b);
+        const ms = Date.now() - t0;
+        assert.ok(ms < 200, `${p.query} ${target}: ${ms} ms`);
+        const expected = rf.edgeCount - rf.nodeCount + rf.components;
+        // roads crossing without a shared point (bridges) make the board non-planar: fewer blocks
+        if ((b.bridges || []).length === 0 && !(b.stats.oneStreetCrossings > 0)) {
+          assert.strictEqual(rf.faces.length, expected, `${p.query} ${target}`);
+        } else {
+          assert.ok(rf.faces.length <= expected && rf.faces.length >= expected - 4 * (b.bridges.length + (b.stats.oneStreetCrossings || 0)), `${p.query} ${target}: ${rf.faces.length} / ${expected}`);
+        }
+        // owners on a full board of one colour: every block and road
+        const stones = new Map(Array.from(b.nodes.keys(), (id) => [id, 'B']));
+        const own = BF.territoryOwners(rf.faces, b.edges, stones, new Map());
+        assert.ok(own.faceOwners.every((o) => o === 'B') && own.edgeOwners.every((o) => o === 'B'));
+      }
+    }
+  });
+  SGM.clearCaches();
+});
+
+test('index.html loads board-faces.js before app.js with the shared ?v=', () => {
+  const html = fs.readFileSync(path.join(ROOT, 'index.html'), 'utf8');
+  const v = html.match(/map-graph\.js\?v=([^"]+)"/)[1];
+  const at = html.indexOf(`board-faces.js?v=${v}"`);
+  assert.ok(at > 0, 'board-faces.js script missing');
+  assert.ok(at < html.indexOf('app.js?v='), 'board-faces.js must come before app.js');
 });
 
 // ---------------------------------------------------------------------------

@@ -3,8 +3,8 @@
   font-style: normal;
   font-display: swap;
   font-weight: 300 600;
-  src: url("vendor/fonts/urbanist/urbanist-latin-wght-normal.woff2?v=16") format("woff2-variations"),
-       url("vendor/fonts/urbanist/urbanist-latin-wght-normal.woff2?v=16") format("woff2");
+  src: url("vendor/fonts/urbanist/urbanist-latin-wght-normal.woff2?v=17") format("woff2-variations"),
+       url("vendor/fonts/urbanist/urbanist-latin-wght-normal.woff2?v=17") format("woff2");
   unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
 }
 
@@ -1498,19 +1498,21 @@ input[type="checkbox"]:checked::after {
   transform: scale(0.92) !important;
 }
 
-/* Score view: territory dots (neutral points have no class and stay as plain empty dots) */
+/* Score view: territory dots (neutral points have no class and stay as plain empty dots).
+   Small, since the blocks and roads of each colour's area are coloured too (app.js); the
+   inner dot is a share of the mark, so it shrinks with it. */
 .go-node.territory-B,
 .go-node.territory-W {
-  transform: scale(0.8);
-  border-width: 1.5px;
+  transform: scale(0.6);
+  border-width: 2px; /* 1.2 px on screen, as 1.5 px was at the old 0.8 */
 }
 
 .go-node.territory-B {
-  background: var(--mist);
+  background: rgba(198, 215, 219, 0.6); /* var(--mist) at 0.6 */
 }
 
 .go-node.territory-W {
-  background: var(--lilac);
+  background: rgba(214, 211, 243, 0.6); /* var(--lilac) at 0.6 */
 }
 
 .go-node.territory-B::before,
@@ -1524,7 +1526,7 @@ input[type="checkbox"]:checked::after {
 
 .go-node.territory-W::before {
   background: #fff;
-  border: 1.5px solid var(--ink);
+  border: 2px solid var(--ink);
 }
 
 /* Compact: narrow window or short window (the same query is COMPACT_MEDIA in app.js) */

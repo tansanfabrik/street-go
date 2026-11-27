@@ -12,13 +12,13 @@
   <link rel="canonical" href="https://street-go.tansanfabrik.com/" />
   <meta name="twitter:card" content="summary" />
   <meta name="theme-color" content="#f7f7f6" />
-  <link rel="icon" type="image/svg+xml" href="favicon.svg?v=16" />
+  <link rel="icon" type="image/svg+xml" href="favicon.svg?v=17" />
   <link
     rel="stylesheet"
-    href="vendor/leaflet/leaflet.css?v=16"
+    href="vendor/leaflet/leaflet.css?v=17"
     integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
   />
-  <link rel="stylesheet" href="style.css?v=16" />
+  <link rel="stylesheet" href="style.css?v=17" />
 </head>
 <body>
   <div id="app">
@@ -248,6 +248,9 @@
         <li>道どうしが交わる所と、行き止まりの先に、石を置く点を置きます。</li>
         <li>範囲の外へ続く道は、範囲の中の最後の交差点までを使い、そこから先は盤にしません。その交差点の点は残します（外周から外へ飛び出す場合を除きます）。</li>
         <li>地名から盤をつくるときは、範囲の辺が道と重なったり並んだりしないよう、範囲の位置を少しずらすことがあります。</li>
+        <li>地図上で範囲を引いたときは、盤の外周が引いた範囲に近くなるように、範囲の各辺を近くの道の輪まで外側か内側へ動かします。動かす幅は 150m までで、4km を超える範囲では広さに応じて広げます。盤の枠が引いた範囲より広がることがあります。</li>
+        <li>一辺が 4km を超える範囲では、大通りだけを使います。交点が 450 を超えるときは、範囲の広さにかかわらず、より大きな通りだけでつくり直します。</li>
+        <li>交点が 9 に届かないときは、辺を動かす幅を 300m まで広げます。それでも届かないときは、外周が道の輪になっていて交点が 4 以上あれば、小さな盤で始めるかどうかを確かめます。</li>
         <li>30m 以内にある交差点は1つにまとめ、実際の交差点のどれかの上に点を置きます。まとめる距離は詳細設定の「交差点の統合距離」で変えられます。</li>
         <li>上下線のように並んで走る道と、重なった線は、1本の線にまとめて描きます。</li>
         <li>入口が1つしかない小さな輪(周囲 150m 未満)は使いません。</li>
@@ -277,7 +280,7 @@
       </ul>
       <h3>データと通信</h3>
       <p class="hint">
-          入力した地名は OpenStreetMap の Nominatim に、範囲の座標は Overpass API（overpass-api.de / private.coffee）に送信されます。自宅住所などの個人情報は入力しないでください。
+          入力した地名は OpenStreetMap の Nominatim に送信されます。道路データは、手元のデータで盤面をつくれないときだけ Overpass API（overpass-api.de）から取得します。このとき送信するのは、範囲を囲む長方形の座標（南・西・北・東の緯度と経度）です。混雑（HTTP 429・502・503・504）、60秒のタイムアウト、接続エラーのときは、10秒待ってから同じ送り先にもう1回だけ送ります。1回の生成で通信にかける時間は、合わせて100秒までです。自宅住所などの個人情報は入力しないでください。
         </p>
       <p class="site-footer">
         地図・道路データ ©
@@ -288,11 +291,12 @@
   </dialog>
 
   <script
-    src="vendor/leaflet/leaflet.js?v=16"
+    src="vendor/leaflet/leaflet.js?v=17"
     integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
   ></script>
-  <script src="map-graph.js?v=16"></script>
-  <script src="go-engine.js?v=16"></script>
-  <script src="app.js?v=16"></script>
+  <script src="map-graph.js?v=17"></script>
+  <script src="board-faces.js?v=17"></script>
+  <script src="go-engine.js?v=17"></script>
+  <script src="app.js?v=17"></script>
 </body>
 </html>

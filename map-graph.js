@@ -1,16 +1,20 @@
 (function (global) {
   'use strict';
 
+  // Overpass servers, tried in this order (one line each; index.html and README name them)
   const OVERPASS_ENDPOINTS = [
-    'https://overpass-api.de/api/interpreter',
-    'https://overpass.private.coffee/api/interpreter'
+    'https://overpass-api.de/api/interpreter'
   ];
   const NOMINATIM_URL = 'https://nominatim.openstreetmap.org/search';
 
   const NOMINATIM_TIMEOUT_MS = 15000;
   const NOMINATIM_MIN_INTERVAL_MS = 1100;
-  const OVERPASS_TIMEOUT_MS = 30000; // covers headers + body download
-  const OVERPASS_SERVER_TIMEOUT_S = 22;
+  const OVERPASS_TIMEOUT_MS = 60000; // per server: headers + body download
+  const OVERPASS_SERVER_TIMEOUT_S = 50;
+  const OVERPASS_TOTAL_MS = 100000; // every road request of one generation together
+  const OVERPASS_RETRY_WAIT_MS = 10000; // all servers failed: wait this long, then once more
+  // HTTP statuses that send the request on to the next server (busy / overloaded / gateway)
+  const OVERPASS_BUSY_STATUS = new Set([429, 502, 503, 504]);
 
   const MIN_BOARD_NODES = 9;
   const DEFAULT_MERGE_RADIUS_M = 30;
@@ -96,15 +100,34 @@
 
   // Drawn board area (a rectangle; Shift + mouse drag makes it a square)
   const MIN_DRAW_SIDE_PX = 15; // shorter side on screen
-  const MAX_DRAW_SIDE_M = 4000; // longer side on the ground
+  const MAX_DRAW_SIDE_M = 20000; // longer side on the ground
   const MAX_DRAW_ASPECT = 6; // longer / shorter side
-  const MAX_DRAW_HALF_DIAG_M = 3500; // radius cap of the Overpass request (before the margin)
+  const MAX_DRAW_HALF_DIAG_M = 14300; // centre to farthest corner (a 20 km square: ~14,142 m)
   const DRAW_FETCH_MARGIN_M = 60;
   const MIN_DRAW_FETCH_RADIUS_M = 120;
+  // Road kinds by the longer side of a drawn range (the query keeps only these; no tags come
+  // back). Up to 4 km: every road of the usual query ('simple', or 'all' with footpaths).
+  const DRAW_SIMPLE_MAX_M = 4000;
+  const DRAW_TERTIARY_MAX_M = 10000; // up to here: tertiary and larger; beyond: secondary and larger
+  // Wider ranges: junctions merged within max(setting, this share of the longer side), at
+  // most DRAW_MERGE_MAX_M; the lengths of small features grow by the same ratio (see lenScale)
+  const DRAW_MERGE_SHARE = 0.008;
+  const DRAW_MERGE_MAX_M = 80;
+  // A drawn range's sides are moved (each on its own, outwards or inwards) so that the board's
+  // outline (a ring of roads) comes as close as possible to the drawn rectangle
+  const FIT_SHIFT_M = 150; // at most this far ...
+  const FIT_SHIFT_WIDE_M = 300; // ... or this far when no board of 9 points or more was found
+  const FIT_STEP_M = 25; // in steps of this
+  const FIT_MAX_BUILDS = 40; // boards built at most by the search (one generation)
+  const FIT_MAX_MS = 1500; // time of the search; past it, the best board found so far
+  const FIT_GOOD_M = 15; // a side whose outline is this close to the drawn side is not searched further
+  const FIT_PER_SIDE = 3; // positions tried per side (the most promising ones)
+  const FIT_CLEAR_M = 15; // a side is moved at least this far beyond the road line it should keep
+  const SMALL_BOARD_MIN_NODES = 4; // fewer than 9 but at least this many: offered with a question
 
   const MSG_BUSY = '混雑しています。しばらく待って再試行してください';
   const MSG_DRAW_TOO_SMALL = 'もう少し大きくドラッグして範囲を引いてください';
-  const MSG_DRAW_TOO_LARGE = '指定した範囲が広すぎます。もう少しズームインして一辺 4km 以内の範囲を引いてください。';
+  const MSG_DRAW_TOO_LARGE = '指定した範囲が広すぎます。もう少しズームインして一辺 20km 以内の範囲を引いてください。';
   const MSG_DRAW_TOO_THIN = '範囲が細長すぎます。もう少し幅を広げてください';
   const MSG_DRAW_BAD_PLACE = 'この位置では範囲を指定できません';
   const MAX_DRAW_ABS_LAT = 85; // Web Mercator shows about +-85.05 degrees
@@ -274,13 +297,60 @@
 
   // In-memory caches to make option tweaks & retries instant
   const geocodeCache = new Map();
-  const roadCache = []; // { lat, lon, radius, elements, mode } (network results, LRU-ish, max 12)
+  // Cache entries: { shape: 'circle', lat, lon, radius, elements, mode } (bundled data, and
+  // data seeded by tests / tools) or { shape: 'rect', bounds, elements, mode } (every network
+  // result: the requests are rectangles). `mode` is the query the data came from: 'simple' /
+  // 'all' (every road, without / with footpaths) or 'tertiary' / 'secondary' / 'primary'
+  // (major roads only). Entries of different modes never stand in for each other.
+  const roadCache = []; // network results, LRU-ish, max 12
   const presetRoadCache = []; // bundled preset data (mode 'simple'), never evicted
   let nextNominatimSlot = 0; // earliest time (ms) the next Nominatim request may start
+  const CACHE_SLACK_M = 15; // data reaching this little short of an area still counts as covering it
 
   function cacheEntries(mode) {
     const m = normalizeRoadMode(mode);
     return presetRoadCache.concat(roadCache).filter((entry) => entry.mode === m);
+  }
+
+  // Metres per degree (latitude; longitude at a latitude), as squareBounds uses them
+  const M_PER_DEG = 111195;
+  function mPerDegLon(lat) {
+    return M_PER_DEG * Math.max(1e-6, Math.cos((lat * Math.PI) / 180));
+  }
+
+  // Distance (m) from (lat, lon) inside a rectangle to its nearest side (negative outside)
+  function rectInnerM(b, lat, lon) {
+    const kx = mPerDegLon(lat);
+    return Math.min((lat - b.south) * M_PER_DEG, (b.north - lat) * M_PER_DEG, (lon - b.west) * kx, (b.east - lon) * kx);
+  }
+
+  // The rectangle grown by m metres on every side (shrunk for m < 0). The east-west growth
+  // uses the latitude of the side farther from the equator (the larger one in degrees).
+  function expandRect(b, m) {
+    const kx = mPerDegLon(Math.max(Math.abs(b.south), Math.abs(b.north)));
+    const dLat = m / M_PER_DEG;
+    const dLon = m / kx;
+    return { south: b.south - dLat, north: b.north + dLat, west: b.west - dLon, east: b.east + dLon };
+  }
+
+  // Radius (m) around (lat, lon) that an entry covers (with the slack), or -Infinity
+  function entryRadiusAt(entry, lat, lon) {
+    if (entry.shape === 'rect') return rectInnerM(entry.bounds, lat, lon) + CACHE_SLACK_M;
+    return entry.radius + CACHE_SLACK_M - distanceMeters(lat, lon, entry.lat, entry.lon);
+  }
+
+  // Does the entry hold the rectangle grown by marginM? (circle: its four corners; the
+  // farthest point of a rectangle from any centre is one of its corners)
+  function entryCoversRect(entry, b, marginM) {
+    if (entry.shape === 'rect') {
+      const g = expandRect(b, marginM - CACHE_SLACK_M);
+      const e = entry.bounds;
+      return g.south >= e.south && g.north <= e.north && g.west >= e.west && g.east <= e.east;
+    }
+    const corners = [[b.south, b.west], [b.south, b.east], [b.north, b.west], [b.north, b.east]];
+    let far = 0;
+    for (const [la, lo] of corners) far = Math.max(far, distanceMeters(entry.lat, entry.lon, la, lo));
+    return far + marginM <= entry.radius + CACHE_SLACK_M;
   }
 
   // Returns { elements, coverage } where coverage is the radius (m) around (lat, lon)
@@ -288,9 +358,9 @@
   // Only entries fetched with the same road mode are considered.
   function findCachedEntry(lat, lon, radiusMeters, mode = 'simple') {
     for (const entry of cacheEntries(mode)) {
-      const shift = distanceMeters(lat, lon, entry.lat, entry.lon);
-      if (shift + radiusMeters <= entry.radius + 15) {
-        return { elements: entry.elements, coverage: Math.max(radiusMeters, entry.radius - shift) };
+      const r = entryRadiusAt(entry, lat, lon);
+      if (radiusMeters <= r) {
+        return { elements: entry.elements, coverage: Math.max(radiusMeters, r - CACHE_SLACK_M) };
       }
     }
     return null;
@@ -300,7 +370,7 @@
   function maxCachedRadius(lat, lon, mode = 'simple') {
     let best = 0;
     for (const entry of cacheEntries(mode)) {
-      const r = entry.radius + 15 - distanceMeters(lat, lon, entry.lat, entry.lon);
+      const r = entryRadiusAt(entry, lat, lon);
       if (r > best) best = r;
     }
     return Math.floor(best);
@@ -311,27 +381,34 @@
     return hit ? hit.elements : null;
   }
 
-  // Cached roads usable for a drawn rectangle: some entry's circle must hold all four
-  // corners plus the same margin a new request would add (DRAW_FETCH_MARGIN_M).
-  // The farthest point of a rectangle from any centre is one of its corners.
-  function findCachedRoadsForRect(b, mode = 'simple') {
-    const corners = [[b.south, b.west], [b.south, b.east], [b.north, b.west], [b.north, b.east]];
-    for (const entry of cacheEntries(mode)) {
-      let far = 0;
-      for (const [la, lo] of corners) far = Math.max(far, distanceMeters(entry.lat, entry.lon, la, lo));
-      if (far + DRAW_FETCH_MARGIN_M <= entry.radius + 15) return entry.elements;
-    }
+  // The cache entry holding the rectangle grown by marginM (the first one found), or null
+  function findCachedEntryForRect(b, marginM, mode = 'simple') {
+    for (const entry of cacheEntries(mode)) if (entryCoversRect(entry, b, marginM)) return entry;
     return null;
   }
 
-  function seedRoadCache(lat, lon, radius, elements, isPreset = false, mode = 'simple') {
-    const entry = { lat, lon, radius, elements, mode: normalizeRoadMode(mode) };
+  // Cached roads usable for a drawn rectangle as drawn: some entry holds it plus the same
+  // margin a new request would add (DRAW_FETCH_MARGIN_M).
+  function findCachedRoadsForRect(b, mode = 'simple') {
+    const entry = findCachedEntryForRect(b, DRAW_FETCH_MARGIN_M, mode);
+    return entry ? entry.elements : null;
+  }
+
+  function addCacheEntry(entry, isPreset) {
     if (isPreset) {
       presetRoadCache.push(entry);
     } else {
       roadCache.unshift(entry);
       if (roadCache.length > 12) roadCache.pop();
     }
+  }
+
+  function seedRoadCache(lat, lon, radius, elements, isPreset = false, mode = 'simple') {
+    addCacheEntry({ shape: 'circle', lat, lon, radius, elements, mode: normalizeRoadMode(mode) }, isPreset);
+  }
+
+  function seedRoadCacheRect(bounds, elements, mode = 'simple') {
+    addCacheEntry({ shape: 'rect', bounds: { ...bounds }, elements, mode: normalizeRoadMode(mode) }, false);
   }
 
   function seedGeocodeCache(query, location) {
@@ -752,29 +829,162 @@
   //                    covered=yes (covered=arcade shopping streets stay; so do
   //                    pedestrian / living_street)
   //  all:              the original filter (includes footpaths and alleys)
+  //  tertiary / secondary / primary: major roads only (wide drawn ranges), each with its
+  //                    _link roads (ramps joining motorways to the other roads); tunnels and
+  //                    covered ways are left out as in simple
+  const MAJOR_ROAD_FILTER = (kinds) =>
+    `["highway"~"^(${kinds})(_link)?$"]["indoor"!="yes"]["covered"!="yes"](if: !is_tag("tunnel") || t["tunnel"] == "no")`;
   const ROAD_WAY_FILTERS = {
     simple: '["highway"]["highway"!~"^(proposed|construction|abandoned|platform|bus_stop|elevator|corridor|footway|path|steps|cycleway|service|track|bridleway)$"]["footway"!~"^(sidewalk|crossing)$"]["indoor"!="yes"]["covered"!="yes"](if: !is_tag("tunnel") || t["tunnel"] == "no")',
-    all: '["highway"]["highway"!~"^(proposed|construction|abandoned|platform|bus_stop|elevator|corridor)$"]["footway"!~"^(sidewalk|crossing)$"]["indoor"!="yes"]'
+    all: '["highway"]["highway"!~"^(proposed|construction|abandoned|platform|bus_stop|elevator|corridor)$"]["footway"!~"^(sidewalk|crossing)$"]["indoor"!="yes"]',
+    tertiary: MAJOR_ROAD_FILTER('motorway|trunk|primary|secondary|tertiary'),
+    secondary: MAJOR_ROAD_FILTER('motorway|trunk|primary|secondary'),
+    primary: MAJOR_ROAD_FILTER('motorway|trunk|primary')
   };
+  // The next, stricter road mode when a board has too many points (null: none left)
+  const NEXT_ROAD_MODE = { simple: 'tertiary', all: 'tertiary', tertiary: 'secondary', secondary: 'primary', primary: null };
 
   function normalizeRoadMode(mode) {
-    return mode === 'all' ? 'all' : 'simple';
+    return Object.prototype.hasOwnProperty.call(ROAD_WAY_FILTERS, mode) ? mode : 'simple';
   }
 
-  function buildOverpassQuery(lat, lon, radiusMeters, mode = 'simple') {
+  // Road mode of a drawn range from its longer side (m); footways only up to DRAW_SIMPLE_MAX_M
+  function drawRoadMode(longM, includeFootways) {
+    if (longM <= DRAW_SIMPLE_MAX_M) return includeFootways ? 'all' : 'simple';
+    return longM <= DRAW_TERTIARY_MAX_M ? 'tertiary' : 'secondary';
+  }
+
+  // Rectangle for a request, rounded outwards to 1e-6 degrees and kept on the globe
+  function requestBounds(b) {
+    return {
+      south: Math.max(-90, Math.floor(b.south * 1e6) / 1e6),
+      west: Math.max(-180, Math.floor(b.west * 1e6) / 1e6),
+      north: Math.min(90, Math.ceil(b.north * 1e6) / 1e6),
+      east: Math.min(180, Math.ceil(b.east * 1e6) / 1e6)
+    };
+  }
+
+  // Rectangle holding the circle of radius r (m) around (lat, lon) (0.5% + 1 m to spare)
+  function circleRequestBounds(lat, lon, r) {
+    return requestBounds(squareBounds(lat, lon, r * 1.005 + 1));
+  }
+
+  function buildOverpassBboxQuery(b, mode = 'simple') {
     const filter = ROAD_WAY_FILTERS[normalizeRoadMode(mode)];
     return `
 [out:json][timeout:${OVERPASS_SERVER_TIMEOUT_S}];
 (
-  way${filter}(around:${Math.round(radiusMeters)},${lat},${lon});
+  way${filter}(${b.south},${b.west},${b.north},${b.east});
 );
 (._;>;);
 out skel qt;
 `.trim();
   }
 
-  // Fetch road ways around a point. Uses cached / bundled data when it covers the area.
-  // ctx: { signal, allowNetwork, mode }  (mode: 'simple' | 'all'; caches never mix modes)
+  // Query for the roads around a point: the rectangle holding the circle
+  function buildOverpassQuery(lat, lon, radiusMeters, mode = 'simple') {
+    return buildOverpassBboxQuery(circleRequestBounds(lat, lon, radiusMeters), mode);
+  }
+
+  // Timings of the road requests (tests shorten them with setNetworkTimings)
+  const netTimings = { perServerMs: OVERPASS_TIMEOUT_MS, totalMs: OVERPASS_TOTAL_MS, retryWaitMs: OVERPASS_RETRY_WAIT_MS, minRequestMs: 5000 };
+  function setNetworkTimings(t) {
+    const d = { perServerMs: OVERPASS_TIMEOUT_MS, totalMs: OVERPASS_TOTAL_MS, retryWaitMs: OVERPASS_RETRY_WAIT_MS, minRequestMs: 5000 };
+    for (const k of Object.keys(d)) netTimings[k] = t && Number.isFinite(t[k]) ? t[k] : d[k];
+  }
+
+  // Shared limits of the road requests of one generation: { deadline } (Date.now() ms)
+  function newNetBudget() {
+    return { deadline: Date.now() + netTimings.totalMs };
+  }
+
+  // Send one Overpass query. The servers are tried in order; a busy answer (429, 502, 503,
+  // 504), another server error (5xx), a timeout, a failed connection or an unreadable body
+  // moves on to the next one. When every server failed, the whole list is tried once more
+  // after netTimings.retryWaitMs, if the generation's time (budget.deadline) leaves room for
+  // the wait and a request. Each request waits at most netTimings.perServerMs and never past
+  // the deadline. A cancel stops everything at once and nothing is sent after it. Other 4xx
+  // answers stop at once (the query itself is refused). Returns the parsed JSON.
+  async function requestOverpass(query, ctx = {}) {
+    const { signal } = ctx;
+    const report = typeof ctx.report === 'function' ? ctx.report : () => {};
+    const budget = ctx.budget || newNetBudget();
+    const failures = []; // { busy, text }
+    for (let round = 0; round < 2; round++) {
+      if (round === 1) {
+        if (budget.deadline - Date.now() < netTimings.retryWaitMs + netTimings.minRequestMs) break;
+        report(`道路データを取得中…（混雑しているため、${Math.round(netTimings.retryWaitMs / 1000)}秒後にもう一度試します）`);
+        await sleep(netTimings.retryWaitMs, signal);
+      }
+      for (let i = 0; i < OVERPASS_ENDPOINTS.length; i++) {
+        throwIfAborted(signal);
+        const left = budget.deadline - Date.now();
+        if (left < netTimings.minRequestMs) {
+          if (failures.length === 0) failures.push({ busy: false, text: 'タイムアウト' });
+          round = 2;
+          break;
+        }
+        if (failures.length > 0 && i > 0) report('道路データを取得中…（混雑しているため別のサーバーに切り替えています）');
+        const req = makeRequestSignal(signal, Math.min(netTimings.perServerMs, left));
+        try {
+          let res;
+          try {
+            res = await fetch(OVERPASS_ENDPOINTS[i], {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8' },
+              body: `data=${encodeURIComponent(query)}`,
+              signal: req.signal
+            });
+          } catch (err) {
+            if (signal && signal.aborted) throw abortedError();
+            failures.push({ busy: false, text: req.isTimedOut() ? 'タイムアウト' : '接続エラー' });
+            continue;
+          }
+          if (OVERPASS_BUSY_STATUS.has(res.status) || res.status >= 500) {
+            failures.push({ busy: OVERPASS_BUSY_STATUS.has(res.status), text: `HTTP ${res.status}` });
+            continue;
+          }
+          if (!res.ok) {
+            throw new StreetGoError('network', `道路データの取得に失敗しました (HTTP ${res.status})。しばらく待って再試行してください。`);
+          }
+          try {
+            return await res.json(); // still under the request timeout
+          } catch (err) {
+            if (signal && signal.aborted) throw abortedError();
+            failures.push({ busy: false, text: req.isTimedOut() ? 'タイムアウト' : '応答の読み取りエラー' });
+            continue;
+          }
+        } finally {
+          req.cleanup();
+        }
+      }
+    }
+    throwIfAborted(signal);
+    const busy = failures.filter((f) => f.busy);
+    if (busy.length > 0) {
+      throw new StreetGoError('busy', `道路データの取得に失敗しました（混雑: ${busy[busy.length - 1].text}）。しばらく待って再試行してください。`);
+    }
+    const last = failures[failures.length - 1];
+    throw new StreetGoError('network', `道路データの取得に失敗しました（通信エラー: ${last ? last.text : '不明'}）。しばらく待って再試行してください。`);
+  }
+
+  // Fetch the roads of a rectangle (always a request; the caller looks at the caches first).
+  // The response is checked (validateOverpassJson) and cached as a rectangle.
+  // ctx: { signal, mode, report, budget }. Returns the cache entry.
+  async function fetchRoadsInRect(bounds, ctx = {}) {
+    const mode = normalizeRoadMode(ctx.mode);
+    const b = requestBounds(bounds);
+    throwIfAborted(ctx.signal);
+    const json = await requestOverpass(buildOverpassBboxQuery(b, mode), ctx);
+    const { elements, cacheable } = validateOverpassJson(json);
+    const entry = { shape: 'rect', bounds: b, elements, mode };
+    if (cacheable) addCacheEntry(entry, false);
+    return entry;
+  }
+
+  // Fetch road ways around a point. Uses cached / bundled data when it covers the area;
+  // otherwise requests the rectangle holding the circle.
+  // ctx: { signal, allowNetwork, mode, report, budget }  (caches never mix modes)
   async function fetchOverpassRoads(lat, lon, radiusMeters, ctx = {}) {
     const { signal, allowNetwork = true } = ctx;
     const mode = normalizeRoadMode(ctx.mode);
@@ -784,60 +994,8 @@ out skel qt;
       throw new StreetGoError('offline', '同梱データの範囲外です。');
     }
     throwIfAborted(signal);
-
-    const query = buildOverpassQuery(lat, lon, radiusMeters, mode);
-    let lastFailure = '';
-
-    for (const endpoint of OVERPASS_ENDPOINTS) {
-      const req = makeRequestSignal(signal, OVERPASS_TIMEOUT_MS);
-      let json;
-      try {
-        let res;
-        try {
-          res = await fetch(endpoint, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8' },
-            body: `data=${encodeURIComponent(query)}`,
-            signal: req.signal
-          });
-        } catch (err) {
-          if (signal && signal.aborted) throw abortedError();
-          lastFailure = req.isTimedOut() ? 'タイムアウト' : '接続エラー';
-          continue; // network failure -> try next endpoint
-        }
-
-        if (res.status === 429 || res.status === 504) {
-          // Rate limited / gateway timeout: do not hammer the next server.
-          throw new StreetGoError('busy', MSG_BUSY);
-        }
-        if (res.status >= 500) {
-          lastFailure = `HTTP ${res.status}`;
-          continue; // server error -> try next endpoint
-        }
-        if (!res.ok) {
-          throw new StreetGoError('network', `道路データの取得に失敗しました (HTTP ${res.status})。しばらく待って再試行してください。`);
-        }
-
-        try {
-          json = await res.json(); // still under the request timeout
-        } catch (err) {
-          if (signal && signal.aborted) throw abortedError();
-          lastFailure = req.isTimedOut() ? 'タイムアウト' : '応答の読み取りエラー';
-          continue;
-        }
-      } finally {
-        req.cleanup();
-      }
-
-      const { elements, cacheable } = validateOverpassJson(json);
-      if (cacheable) seedRoadCache(lat, lon, radiusMeters, elements, false, mode);
-      return elements;
-    }
-
-    throw new StreetGoError(
-      'network',
-      `道路データの取得に失敗しました（通信エラー: ${lastFailure || '不明'}）。しばらく待って再試行してください。`
-    );
+    const entry = await fetchRoadsInRect(circleRequestBounds(lat, lon, radiusMeters), { ...ctx, mode });
+    return entry.elements;
   }
 
   // Grid cell sizes (degrees) that cover a real distance r at every latitude up to
@@ -1903,6 +2061,12 @@ out skel qt;
     normalizeRoutes(G, cov);
   }
 
+  // Factor on the lengths of small features (loops, second routes, short branches, drawn-only
+  // pieces) of the board being built: 1, except for wide drawn ranges (see lenScale)
+  function lenScaleOf(G) {
+    return G.lenScale > 1 ? G.lenScale : 1;
+  }
+
   function normalizeLoopsOnce(G, cov) {
     const lostLoop = new Set();
     let any = false;
@@ -1911,7 +2075,7 @@ out skel qt;
       any = true;
       const cum = cumXY(e.pts);
       const L = cum[cum.length - 1];
-      if (L < LOOP_MIN_M) {
+      if (L < LOOP_MIN_M * lenScaleOf(G)) {
         G.removeEdge(e.eid);
         cov.mergedM += e.src;
         lostLoop.add(e.u);
@@ -1919,7 +2083,7 @@ out skel qt;
       }
       // A small loop with one way in (a turning loop, a block ring) is left out whole: no
       // shape points, no dead end at its far side
-      if (L < SMALL_LOOP_M) {
+      if (L < SMALL_LOOP_M * lenScaleOf(G)) {
         G.removeEdge(e.eid);
         cov.droppedM.smallLoop += e.src;
         lostLoop.add(e.u);
@@ -1977,7 +2141,8 @@ out skel qt;
         const lk = lenXY(keep.pts);
         const le = lenXY(pts);
         const duplicate = hausdorffXY(pts, keep.pts) <= DUPLICATE_ROUTE_M;
-        if (!duplicate && (lk + le < SMALL_ROUTES_M || (lk < SHORT_ROUTE_M && le < SHORT_ROUTE_M))) {
+        const ls = lenScaleOf(G);
+        if (!duplicate && (lk + le < SMALL_ROUTES_M * ls || (lk < SHORT_ROUTE_M * ls && le < SHORT_ROUTE_M * ls))) {
           // two short routes: the shorter one stays (the other cannot cut the board in two)
           G.removeEdge(e.eid);
           cov.droppedM.smallLoop += e.src;
@@ -2117,7 +2282,7 @@ out skel qt;
       if (pt.pin || pt.shape || pt.mid || G.degree(pt.pid) !== 1) continue; // (a pinned junction stays)
       const e = G.edges.get(Array.from(G.inc.get(pt.pid))[0]);
       const inner = e.u === pt.pid ? e.v : e.u;
-      if (inner === pt.pid || lenXY(e.pts) >= SHORT_SPUR_M) continue;
+      if (inner === pt.pid || lenXY(e.pts) >= SHORT_SPUR_M * lenScaleOf(G)) continue;
       const ip = G.points.get(inner);
       if (!ip || G.degree(inner) === 1) continue; // a 2-point road: not a branch
       drop.push([pt.pid, e.eid, inner]);
@@ -2229,7 +2394,7 @@ out skel qt;
     const pts = e.u === inner ? e.pts : e.pts.slice().reverse(); // inner -> pid
     const own = G.tails.filter((t) => t.pid === pid);
     const extra = own.length ? Math.max(...own.map((t) => lenXY(t.pts))) : 0;
-    if (lenXY(pts) + extra >= TAIL_MAX_M) return false;
+    if (lenXY(pts) + extra >= TAIL_MAX_M * lenScaleOf(G)) return false;
     const ways = new Set(e.ways);
     G.tails = G.tails.filter((t) => t.pid !== pid);
     if (own.length === 0) {
@@ -2343,8 +2508,9 @@ out skel qt;
     return removed;
   }
 
-  // Only the largest connected part stays (most points, then the longest roads); the other
-  // parts are left out (counted as smallComponent). Returns the number of parts left out.
+  // Only the largest connected part stays (a part with a ring of roads before one without:
+  // only a ring can make the board's outline; then most points, then the longest roads); the
+  // other parts are left out (counted as smallComponent). Returns the number of parts left out.
   function keepLargestComponent(G, cov) {
     const seen = new Set();
     const comps = [];
@@ -2353,10 +2519,14 @@ out skel qt;
       const comp = [pid];
       seen.add(pid);
       let len = 0;
+      let edges = 0;
       for (let i = 0; i < comp.length; i++) {
         for (const eid of G.inc.get(comp[i])) {
           const e = G.edges.get(eid);
-          if (e.u === comp[i]) len += e.src;
+          if (e.u === comp[i]) {
+            len += e.src;
+            edges++;
+          }
           const o = e.u === comp[i] ? e.v : e.u;
           if (!seen.has(o)) {
             seen.add(o);
@@ -2364,10 +2534,11 @@ out skel qt;
           }
         }
       }
-      comps.push({ comp, len, first: pid });
+      // (a connected part has a ring exactly when it has as many roads as points or more)
+      comps.push({ comp, len, ring: edges >= comp.length ? 1 : 0, first: pid });
     }
     if (comps.length <= 1) return 0;
-    comps.sort((a, b) => b.comp.length - a.comp.length || b.len - a.len || cmpKey(a.first, b.first));
+    comps.sort((a, b) => b.ring - a.ring || b.comp.length - a.comp.length || b.len - a.len || cmpKey(a.first, b.first));
     for (const { comp, len } of comps.slice(1)) {
       cov.droppedM.smallComponent += len;
       for (const pid of comp) G.removePoint(pid);
@@ -2955,6 +3126,7 @@ out skel qt;
     });
     const clusters = clusterJunctions(jList, r, linked);
     const G = makeWorkGraph();
+    G.lenScale = Number.isFinite(options.lenScale) && options.lenScale > 1 ? options.lenScale : 1;
     G.offRoad = offRoad;
     G.maxOffRoad = (pts) => {
       const cum = cumXY(pts);
@@ -3572,6 +3744,314 @@ out skel qt;
       north: Math.min(b.north, maxLat + padLat),
       west: Math.max(b.west, minLon - padLon),
       east: Math.min(b.east, maxLon + padLon)
+    };
+  }
+
+  // ---------------------------------------------------------------------------
+  // Drawn ranges: the sides are moved so that the board's outline (a ring of roads) comes as
+  // close as possible to the drawn rectangle. Roads leaving the range end at their last
+  // junction inside and the outline is a ring of roads, so a range cut exactly as drawn gives
+  // a board about one block smaller than the drawn rectangle.
+
+  const SIDES = ['west', 'east', 'south', 'north'];
+
+  // Rectangle of the drawn range `F.rect` with each side moved `o[side]` metres outwards
+  // (negative: inwards), in the drawn range's local metres
+  function movedRect(F, o) {
+    return {
+      south: F.rect.south - o.south / F.ky,
+      north: F.rect.north + o.north / F.ky,
+      west: F.rect.west - o.west / F.kx,
+      east: F.rect.east + o.east / F.kx
+    };
+  }
+
+  // Roads running along each side of the drawn rectangle, near it: pieces (SHIFT_PIECE_M at
+  // most) within SHIFT_ANGLE_DEG of the side's direction and within the side's span, gathered
+  // by their distance from the side (5 m bins up to `reach` metres outside and inside, bins
+  // up to 10 m apart joined). A line counts when its length is at least 30% of the side (40 m
+  // or more). Returns { west, east, south, north }: positions (m outwards from the drawn side,
+  // negative inside), ascending.
+  function sideRoadLines(prep, F, reach, dropAreas) {
+    const tan = Math.tan((SHIFT_ANGLE_DEG * Math.PI) / 180);
+    const BIN = 5;
+    const nb = Math.ceil((2 * reach) / BIN) + 1;
+    const hist = {};
+    for (const s of SIDES) hist[s] = new Float64Array(nb);
+    const add = (s, u, len) => {
+      if (u <= -reach || u >= reach) return;
+      hist[s][Math.floor((u + reach) / BIN)] += len;
+    };
+    const box = { south: F.rect.south - reach / F.ky, north: F.rect.north + reach / F.ky, west: F.rect.west - reach / F.kx, east: F.rect.east + reach / F.kx };
+    for (const w of prep.ways) {
+      if (dropAreas && w.areaLike) continue;
+      if (w.maxLat < box.south || w.minLat > box.north || w.maxLon < box.west || w.minLon > box.east) continue;
+      let prev = null;
+      for (const nid of w.nodes) {
+        const [la, lo] = prep.nodes.get(nid);
+        const p = F.xy(la, lo);
+        if (prev) {
+          const dx = p[0] - prev[0];
+          const dy = p[1] - prev[1];
+          const L = Math.hypot(dx, dy);
+          const vertical = L > 1e-6 && Math.abs(dx) <= tan * Math.abs(dy);
+          const horizontal = L > 1e-6 && Math.abs(dy) <= tan * Math.abs(dx);
+          if (vertical || horizontal) {
+            const n = Math.ceil(L / SHIFT_PIECE_M);
+            for (let k = 0; k < n; k++) {
+              const x = prev[0] + (dx * (k + 0.5)) / n;
+              const y = prev[1] + (dy * (k + 0.5)) / n;
+              if (vertical && y >= F.y0 && y <= F.y1) {
+                add('west', F.x0 - x, L / n);
+                add('east', x - F.x1, L / n);
+              }
+              if (horizontal && x >= F.x0 && x <= F.x1) {
+                add('south', F.y0 - y, L / n);
+                add('north', y - F.y1, L / n);
+              }
+            }
+          }
+        }
+        prev = p;
+      }
+    }
+    const out = {};
+    for (const s of SIDES) {
+      const span = s === 'west' || s === 'east' ? F.y1 - F.y0 : F.x1 - F.x0;
+      const need = Math.max(40, 0.3 * span);
+      const lines = [];
+      let cur = null;
+      let gap = 0;
+      for (let i = 0; i < nb; i++) {
+        const v = hist[s][i];
+        if (v > 0) {
+          if (!cur) cur = { len: 0, mom: 0 };
+          cur.len += v;
+          cur.mom += v * (-reach + (i + 0.5) * BIN);
+          gap = 0;
+        } else if (cur && ++gap > 2) {
+          if (cur.len >= need) lines.push(cur.mom / cur.len);
+          cur = null;
+        }
+      }
+      if (cur && cur.len >= need) lines.push(cur.mom / cur.len);
+      out[s] = lines;
+    }
+    return out;
+  }
+
+  // Side positions worth building for one side (metres outwards, on the FIT_STEP_M grid within
+  // +-maxShift), most promising first. A cut at o keeps the roads along the side up to about
+  // o; the outline is expected on the outermost road line inside the cut. Positions expecting
+  // the same line are one choice: the first one at least FIT_CLEAR_M beyond the line (a cut
+  // farther out takes in more of the roads leaving the line), else the farthest one; without
+  // a line, the smallest move. Choices are ranked by how far their line is from the drawn side.
+  // (scale: the drawn range's lenScale; the step and the clearance grow with it)
+  function sidePositions(lines, maxShift, scale = 1) {
+    const step = FIT_STEP_M * scale;
+    const groups = new Map();
+    for (let i = -Math.round(maxShift / step); i <= Math.round(maxShift / step); i++) {
+      const o = i * step;
+      let pred = null;
+      for (const a of lines) if (a <= o - 2 && (pred === null || a > pred)) pred = a;
+      const key = pred === null ? 'none' : String(pred);
+      const c = { o, pred };
+      const g = groups.get(key);
+      let take = !g;
+      if (g && pred === null) take = Math.abs(o) < Math.abs(g.o);
+      else if (g) {
+        const ok = (x) => x - pred >= FIT_CLEAR_M * scale;
+        take = ok(o) ? !ok(g.o) || o < g.o : !ok(g.o) && o > g.o;
+      }
+      if (take) groups.set(key, c);
+    }
+    return Array.from(groups.values())
+      .sort((a, b) => (a.pred === null) - (b.pred === null) ||
+        (a.pred === null ? 0 : Math.abs(a.pred) - Math.abs(b.pred)) ||
+        Math.abs(a.o) - Math.abs(b.o) || a.o - b.o)
+      .map((c) => c.o);
+  }
+
+  // Search for the drawn range's board (a generator, like buildBoardGen). Boards are built for
+  // rectangles whose sides are moved by up to fit.maxShift (each side on its own): first as
+  // drawn, then every side at its most promising position, then side by side (largest
+  // deviation first) the other promising positions of that side, at most two rounds. A board
+  // counts when its outline (a ring of roads) exists and it has MIN_BOARD_NODES..MAX_BOARD_NODES
+  // points; of those, the one whose outline (its bounding rectangle) is nearest to the drawn
+  // rectangle (the sum of the four sides' distances) wins, then the one moved outwards least.
+  // A rectangle the data does not hold (fit.covers) is not built. The search stops early at
+  // fit.budget (boards built, time). Returns { best, small, minCount, maxCount, maxRingCount,
+  // tooMany, builds } (best / small: { g, o, dev, sideDev }; small: the largest board with an
+  // outline and SMALL_BOARD_MIN_NODES..MIN_BOARD_NODES-1 points).
+  function* fitRangeGen(prep, drawn, options, fit) {
+    const F = makeFrame(drawn);
+    const dropAreas = options.dropAreaOutlines === undefined ? DROP_AREA_OUTLINES : !!options.dropAreaOutlines;
+    const M = fit.maxShift;
+    const budget = fit.budget;
+    const memo = fit.memo || new Map();
+    const scale = Number.isFinite(options.lenScale) && options.lenScale > 1 ? options.lenScale : 1;
+    const lines = sideRoadLines(prep, F, M + 60 * scale, dropAreas);
+    yield;
+    const positions = {};
+    for (const s of SIDES) positions[s] = sidePositions(lines[s], M, scale);
+    const out = { best: null, small: null, minCount: Infinity, maxCount: 0, maxRingCount: 0, tooMany: false, builds: 0, stopped: false };
+    let built = 0;
+    const keyOf = (o) => SIDES.map((s) => o[s]).join(',');
+    const outward = (o) => SIDES.reduce((t, s) => t + Math.max(0, o[s]), 0);
+    const moved = (o) => SIDES.reduce((t, s) => t + Math.abs(o[s]), 0);
+    // class 0: a board; 1: a small board; 2: neither
+    const cls = (r) => (r.valid ? 0 : r.small ? 1 : 2);
+    const better = (a, b) => {
+      if (!b) return true;
+      if (cls(a) !== cls(b)) return cls(a) < cls(b);
+      if (cls(a) === 1 && a.n !== b.n) return a.n > b.n;
+      // neither: too many points -> fewer; else more points (on the way to a ring), then a ring
+      if (cls(a) === 2) {
+        const am = a.n > MAX_BOARD_NODES;
+        const bm = b.n > MAX_BOARD_NODES;
+        if (am !== bm) return !am;
+        if (am) return a.n < b.n;
+        return a.n > b.n || (a.n === b.n && a.ring && !b.ring);
+      }
+      if (Math.abs(a.dev - b.dev) > 1e-6) return a.dev < b.dev;
+      if (Math.abs(outward(a.o) - outward(b.o)) > 1e-6) return outward(a.o) < outward(b.o);
+      if (Math.abs(moved(a.o) - moved(b.o)) > 1e-6) return moved(a.o) < moved(b.o);
+      return keyOf(a.o) < keyOf(b.o);
+    };
+    const note = (r) => {
+      if (!out.best && r.valid) out.best = r;
+      else if (r.valid && better(r, out.best)) out.best = r;
+      if (r.small && (!out.small || r.n > out.small.n || (r.n === out.small.n && better(r, out.small)))) out.small = r;
+      out.minCount = Math.min(out.minCount, r.n);
+      if (Number.isFinite(r.n)) out.maxCount = Math.max(out.maxCount, r.n);
+      if (r.ring && Number.isFinite(r.n)) out.maxRingCount = Math.max(out.maxRingCount, r.n);
+    };
+    // Build the board for side moves o; null when the rectangle is not usable or the budget is
+    // spent (the first two builds of a search always run)
+    const evaluate = function* (o) {
+      const key = keyOf(o);
+      if (memo.has(key)) {
+        const m = memo.get(key);
+        if (m) note(m);
+        return m;
+      }
+      const rect = movedRect(F, o);
+      const sz = rectSizeMeters(rect);
+      if (!(sz.widthM >= 40 && sz.heightM >= 40) || !fit.covers(rect)) return null;
+      // (a build is not started when the time left is shorter than the longest build so far;
+      // the time counted is that of the builds, not of the road requests between them)
+      if (built >= 2 && (budget.builds >= budget.maxBuilds || budget.usedMs + budget.longestMs > budget.maxMs)) {
+        out.stopped = true;
+        return null;
+      }
+      budget.builds++;
+      built++;
+      out.builds++;
+      let g = null;
+      let n;
+      const tb = nowMs();
+      try {
+        g = yield* buildBoardGen(prep, rect, options);
+        n = g.nodes.size;
+      } catch (err) {
+        if (!err || err.kind !== 'too-many') throw err;
+        n = Infinity;
+      }
+      budget.usedMs += nowMs() - tb;
+      budget.longestMs = Math.max(budget.longestMs, nowMs() - tb);
+      const r = { o: { ...o }, rect, g, n, ring: !!(g && g.outline), valid: false, small: false, dev: Infinity, sideDev: null };
+      if (r.ring) {
+        let x0 = Infinity;
+        let x1 = -Infinity;
+        let y0 = Infinity;
+        let y1 = -Infinity;
+        for (const [la, lo] of g.outline) {
+          const [x, y] = F.xy(la, lo);
+          x0 = Math.min(x0, x);
+          x1 = Math.max(x1, x);
+          y0 = Math.min(y0, y);
+          y1 = Math.max(y1, y);
+        }
+        r.sideDev = { west: Math.abs(x0 - F.x0), east: Math.abs(x1 - F.x1), south: Math.abs(y0 - F.y0), north: Math.abs(y1 - F.y1) };
+        r.dev = SIDES.reduce((t, s) => t + r.sideDev[s], 0);
+        r.valid = n >= MIN_BOARD_NODES && n <= MAX_BOARD_NODES;
+        r.small = n >= SMALL_BOARD_MIN_NODES && n < MIN_BOARD_NODES;
+      }
+      memo.set(key, r);
+      note(r);
+      return r;
+    };
+    const zero = { west: 0, east: 0, south: 0, north: 0 };
+    let cur = yield* evaluate(zero);
+    const first = {};
+    for (const s of SIDES) first[s] = positions[s].length ? positions[s][0] : 0;
+    const guess = yield* evaluate(first);
+    if (guess && (!cur || better(guess, cur))) cur = guess;
+    // no board yet: every side moved out as far as the data allows, so that the search can
+    // move the sides back in from a ring
+    if (!(cur && cur.valid)) {
+      for (const k of [1, 2 / 3, 1 / 3]) {
+        const g = Math.round((k * M) / (FIT_STEP_M * scale)) * FIT_STEP_M * scale;
+        const o = { west: g, east: g, south: g, north: g };
+        if (!fit.covers(movedRect(F, o))) continue;
+        const wide = yield* evaluate(o);
+        if (wide && (!cur || better(wide, cur))) cur = wide;
+        break;
+      }
+    }
+    if (!cur) cur = { o: zero, valid: false, small: false, n: 0, sideDev: null };
+    // far too many points: even the sides all moved in as far as allowed would keep too many
+    // (points taken to grow with the area)
+    if (!out.best && out.minCount > MAX_BOARD_NODES) {
+      const w = F.x1 - F.x0;
+      const h = F.y1 - F.y0;
+      const share = (Math.max(40, w - 2 * M) * Math.max(40, h - 2 * M)) / (w * h);
+      if (out.minCount * share > MAX_BOARD_NODES) {
+        out.tooMany = true;
+        return out;
+      }
+    }
+    for (let round = 0; round < 2 && !out.stopped; round++) {
+      let changed = false;
+      const order = SIDES.slice().sort((a, b) => (cur.sideDev ? cur.sideDev[b] - cur.sideDev[a] : 0) || SIDES.indexOf(a) - SIDES.indexOf(b));
+      for (const s of order) {
+        if (out.stopped) break;
+        if (cur.valid && cur.sideDev[s] <= FIT_GOOD_M * scale) continue;
+        let tries = positions[s].slice(0, FIT_PER_SIDE);
+        if (!tries.includes(0)) tries.push(0);
+        // too many points: the side's positions further in, nearest first
+        if (!cur.valid && cur.n > MAX_BOARD_NODES) tries = positions[s].filter((v) => v < cur.o[s]).sort((p, q) => q - p).slice(0, FIT_PER_SIDE);
+        for (const v of tries) {
+          if (v === cur.o[s]) continue;
+          const r = yield* evaluate({ ...cur.o, [s]: v });
+          if (out.stopped) break;
+          if (r && better(r, cur)) {
+            cur = r;
+            changed = true;
+          }
+        }
+      }
+      if (!changed) break;
+    }
+    out.tooMany = !out.best && out.minCount > MAX_BOARD_NODES;
+    return out;
+  }
+
+  // Search statistics of a drawn range's board (metres, rounded)
+  function fitStats(r, search) {
+    const round = (v) => Math.round(v);
+    return {
+      offsets: { west: round(r.o.west), east: round(r.o.east), south: round(r.o.south), north: round(r.o.north) },
+      deviationM: {
+        west: round(r.sideDev.west),
+        east: round(r.sideDev.east),
+        south: round(r.sideDev.south),
+        north: round(r.sideDev.north),
+        total: round(r.dev)
+      },
+      maxShiftM: search.maxShift,
+      builds: search.builds,
+      stopped: search.stopped
     };
   }
 
@@ -4744,13 +5224,14 @@ out skel qt;
       if (maxR > 0 && (!allowNetwork || maxR >= former)) radius = Math.min(radius, maxR);
     }
     let graph = null;
+    const net = newNetBudget(); // the road requests of this generation share one time limit
 
     // At most one automatic enlargement (2 attempts total).
     for (let attempt = 1; attempt <= 2; attempt++) {
       throwIfAborted(signal);
       const cachedBefore = findCachedEntry(location.lat, location.lon, radius, mode);
       report(cachedBefore ? '道路データを読み込み中...' : `周辺の道路網を取得中 (半径 ${radius}m)...`);
-      const elements = await fetchOverpassRoads(location.lat, location.lon, radius, { signal, allowNetwork, mode });
+      const elements = await fetchOverpassRoads(location.lat, location.lon, radius, { signal, allowNetwork, mode, report, budget: net });
       const coverage = cachedBefore ? cachedBefore.coverage : radius;
 
       report('交差点グラフを構築中...');
@@ -4782,56 +5263,170 @@ out skel qt;
     };
   }
 
+  // Board of a drawn range. The rectangle is checked before any request. Roads come from the
+  // data at hand when it holds the range moved outwards by the search's reach (+ margin), else
+  // from one request for that rectangle (offline: only the data at hand, and only the moved
+  // rectangles it holds). The sides are then moved to the nearest ring of roads (fitRangeGen):
+  // up to FIT_SHIFT_M, and up to FIT_SHIFT_WIDE_M when that gives no board of 9 points or more.
+  // Wider ranges use major roads only (drawRoadMode) with a larger merge radius; a board with
+  // too many points is made again from the next, stricter road kinds (NEXT_ROAD_MODE).
+  // Errors: 'area', 'offline', 'network' / 'busy' / 'incomplete', 'too-many', 'too-few';
+  // 'small-board' (err.board: the board) when only a board of SMALL_BOARD_MIN_NODES..8 points
+  // with an outline was found (the app asks before using it).
+  // ctx: { signal, allowNetwork, fitMaxMs }
   async function generateStreetGoBoardInBounds(bounds, options, onProgress, ctx = {}) {
     const { signal, allowNetwork = true } = ctx;
     const report = (msg) => {
       if (typeof onProgress === 'function') onProgress(msg);
     };
+    options = options || {};
 
     // `bounds` is any rectangle { south, west, north, east }. Checked before any request.
     const place = normalizeDrawnBounds(bounds);
     if (!place.ok) throw new StreetGoError('area', place.message);
-    bounds = place.bounds;
-    const circle = rectCoverCircle(bounds);
-    const centerLat = circle.lat;
-    const centerLon = circle.lon;
-
+    const drawn = place.bounds;
+    const circle = rectCoverCircle(drawn);
     if (!(circle.halfDiagM <= MAX_DRAW_HALF_DIAG_M)) {
       throw new StreetGoError('area', MSG_DRAW_TOO_LARGE);
     }
-    const shape = checkDrawnRect(rectSizeMeters(bounds));
+    const size = rectSizeMeters(drawn);
+    const shape = checkDrawnRect(size);
     if (!shape.ok) throw new StreetGoError('area', shape.message);
 
-    // Data at hand (bundled / fetched earlier) is used when its circle holds the whole
-    // rectangle; only a new request uses the circle that covers the rectangle.
-    const fetchRadius = circle.radiusM;
-    const mode = options.includeFootways ? 'all' : 'simple';
-    let elements = findCachedRoadsForRect(bounds, mode);
-    if (elements) {
-      report('道路データを読み込み中...');
-    } else {
-      report(`選択範囲の道路網を取得中 (半径 ${fetchRadius}m)...`);
-      elements = await fetchOverpassRoads(centerLat, centerLon, fetchRadius, { signal, allowNetwork, mode });
+    // Wider ranges: major roads, larger merge radius and small-feature lengths
+    const longM = Math.max(size.widthM, size.heightM);
+    let mode = drawRoadMode(longM, !!options.includeFootways);
+    const buildOptions = { ...options };
+    if (longM > DRAW_SIMPLE_MAX_M) {
+      const wideR = Math.min(DRAW_MERGE_MAX_M, longM * DRAW_MERGE_SHARE);
+      const setR = Number.isFinite(options.mergeRadiusMeters) && options.mergeRadiusMeters > 0 ? options.mergeRadiusMeters : DEFAULT_MERGE_RADIUS_M;
+      buildOptions.mergeRadiusMeters = Math.max(setR, wideR);
+      buildOptions.lenScale = Math.max(1, wideR / DEFAULT_MERGE_RADIUS_M);
     }
+    const notices = [];
+    if (mode !== 'simple' && mode !== 'all') notices.push('範囲が広いため、大通りだけで盤をつくりました。');
 
-    report('範囲内の交差点グラフを構築中...');
+    const net = newNetBudget();
     const t0 = nowMs();
-    const prep = prepareRoadData(elements);
-    const graph = await runGenAsync(buildBoardGen(prep, bounds, options), signal);
-    graph.stats.totalMs = Math.round(nowMs() - t0);
+    const fitBudget = { builds: 0, usedMs: 0, longestMs: 0, maxBuilds: FIT_MAX_BUILDS, maxMs: Number.isFinite(ctx.fitMaxMs) ? ctx.fitMaxMs : FIT_MAX_MS };
+    const majorOnly = () => mode !== 'simple' && mode !== 'all';
 
-    throwIfAborted(signal);
-    if (graph.stats.nodeCount > MAX_BOARD_NODES) {
-      throw new StreetGoError('too-many', `交点が多すぎます(${graph.stats.nodeCount}点)。範囲を狭めてください`);
-    }
-    assertPlayableBoard(graph ? graph.stats.nodeCount : 0);
-
-    return {
-      location: { lat: centerLat, lon: centerLon, displayName: '指定範囲' },
-      radiusUsed: fetchRadius,
-      customBounds: bounds,
-      ...graph
+    // Reach of the side moves and margin of the data, grown with the range (lenScale)
+    const scale = buildOptions.lenScale || 1;
+    const reachA = FIT_SHIFT_M * scale;
+    const reachB = FIT_SHIFT_WIDE_M * scale;
+    const margin = DRAW_FETCH_MARGIN_M * scale;
+    const fetchFor = async (reach) => {
+      report(majorOnly() ? '選択範囲の大通りを取得中...' : '選択範囲の道路網を取得中...');
+      const entry = await fetchRoadsInRect(expandRect(drawn, reach + margin), { signal, mode, report, budget: net });
+      throwIfAborted(signal);
+      return entry;
     };
+
+    // One road mode. Data at hand (bundled / fetched earlier) holding the range as drawn comes
+    // first: the search tries the moved rectangles it holds (reach A, then B) and a board found
+    // so (9 points or more, or a small one) is used without any request. Only when it gives
+    // none, and it does not already hold every rectangle tried, is the range + reach B
+    // requested and searched again. Without such data the range + reach A is requested first
+    // (then + reach B if needed). Returns the outcome.
+    const tryMode = async () => {
+      const memos = new WeakMap();
+      const st = { small: null, maxRing: 0, maxAny: 0 };
+      const search = async (entry, reaches) => {
+        const covers = (rect) => entryCoversRect(entry, rect, margin);
+        const prep = prepareRoadData(entry.elements);
+        if (!memos.has(prep)) memos.set(prep, new Map());
+        for (const reach of reaches) {
+          report(reach === reachA ? '範囲の外周を近くの道に合わせています...' : '盤が小さいため、範囲を広げて探しています...');
+          const res = await runGenAsync(fitRangeGen(prep, drawn, buildOptions, { maxShift: reach, covers, budget: fitBudget, memo: memos.get(prep) }), signal);
+          st.maxRing = Math.max(st.maxRing, res.maxRingCount);
+          st.maxAny = Math.max(st.maxAny, res.maxCount);
+          if (res.best) return { best: res.best, search: { ...res, maxShift: reach } };
+          if (res.tooMany) return { tooMany: true, minCount: res.minCount };
+          if (res.small && (!st.small || res.small.n > st.small.r.n)) st.small = { r: res.small, search: { ...res, maxShift: reach } };
+        }
+        return null;
+      };
+      const local = findCachedEntryForRect(drawn, margin, mode);
+      if (local) {
+        report('道路データを読み込み中...');
+        const r = await search(local, [reachA, reachB]);
+        if (r) return r;
+        if (st.small || !allowNetwork || entryCoversRect(local, drawn, reachB + margin)) return st;
+        const r2 = await search(await fetchFor(reachB), [reachA, reachB]);
+        return r2 || st;
+      }
+      if (!allowNetwork) throw new StreetGoError('offline', '同梱データの範囲外です。');
+      const r = await search(await fetchFor(reachA), [reachA]);
+      if (r) return r;
+      const wide = findCachedEntryForRect(drawn, reachB + margin, mode) || await fetchFor(reachB);
+      return (await search(wide, [reachB])) || st;
+    };
+
+    let outcome;
+    for (;;) {
+      try {
+        outcome = await tryMode();
+      } catch (err) {
+        // too much road data (response or roads in the range): the next road kinds
+        if (err && err.kind === 'too-many' && NEXT_ROAD_MODE[mode] && allowNetwork) {
+          outcome = { tooMany: true, error: err };
+        } else {
+          throw err;
+        }
+      }
+      if (!outcome.tooMany) break;
+      const next = NEXT_ROAD_MODE[mode];
+      if (!next || !allowNetwork) {
+        if (outcome.error) throw outcome.error;
+        throw new StreetGoError('too-many', Number.isFinite(outcome.minCount)
+          ? `交点が多すぎます(${outcome.minCount}点)。範囲を狭めてください`
+          : '範囲内の道路が多すぎます。範囲を狭めてください');
+      }
+      mode = next;
+      report('交点が多すぎるため、大通りだけでつくり直しています...');
+      if (!notices.some((t) => t.startsWith('交点が多すぎた'))) {
+        for (let i = notices.length - 1; i >= 0; i--) if (notices[i].startsWith('範囲が広い')) notices.splice(i, 1);
+        notices.push('交点が多すぎたため、大通りだけで盤をつくりました。');
+      }
+      fitBudget.builds = 0;
+      fitBudget.usedMs = 0;
+      fitBudget.longestMs = 0;
+    }
+    throwIfAborted(signal);
+
+    const finish = (r, search) => {
+      const graph = r.g;
+      graph.frameBounds = fitFrame(graph);
+      graph.stats.fit = fitStats(r, search);
+      graph.stats.roadMode = mode;
+      graph.stats.mergeRadiusM = Number.isFinite(buildOptions.mergeRadiusMeters) && buildOptions.mergeRadiusMeters > 0 ? buildOptions.mergeRadiusMeters : DEFAULT_MERGE_RADIUS_M;
+      graph.stats.lenScale = buildOptions.lenScale || 1;
+      graph.stats.notices = notices.slice();
+      graph.stats.totalMs = Math.round(nowMs() - t0);
+      return {
+        location: { lat: circle.lat, lon: circle.lon, displayName: '指定範囲' },
+        radiusUsed: circle.radiusM,
+        ...graph,
+        // the range as drawn (customBounds: the same, kept for older callers), the rectangle
+        // the roads were cut to (boardBounds) and the frame shown (frameBounds)
+        drawnBounds: drawn,
+        customBounds: drawn,
+        cutBounds: graph.boardBounds
+      };
+    };
+
+    if (outcome.best) return finish(outcome.best, outcome.search);
+    if (outcome.small) {
+      const board = finish(outcome.small.r, outcome.small.search);
+      const err = new StreetGoError('small-board', `${board.stats.nodeCount}点の小さな盤です。この盤で始めますか？`);
+      err.board = board;
+      throw err;
+    }
+    if (outcome.maxRing > 0 || outcome.maxAny === 0) {
+      throw new StreetGoError('too-few', `交点が少なすぎます(${outcome.maxRing}点)。範囲を広げるか別の場所を選んでください`);
+    }
+    throw new StreetGoError('too-few', `道が輪になる所がなく、盤の外周をつくれません(${outcome.maxAny}点)。範囲を広げるか別の場所を選んでください`);
   }
 
   const api = {
@@ -4855,6 +5450,13 @@ out skel qt;
     MAX_DRAW_ASPECT,
     MAX_DRAW_HALF_DIAG_M,
     DRAW_FETCH_MARGIN_M,
+    DRAW_SIMPLE_MAX_M,
+    DRAW_TERTIARY_MAX_M,
+    FIT_SHIFT_M,
+    FIT_SHIFT_WIDE_M,
+    FIT_MAX_BUILDS,
+    FIT_MAX_MS,
+    SMALL_BOARD_MIN_NODES,
     // exposed for tests / tooling
     buildRoadGraph,
     prepareRoadData,
@@ -4865,6 +5467,12 @@ out skel qt;
     clusterJunctions,
     ASSET_VERSION,
     buildOverpassQuery,
+    buildOverpassBboxQuery,
+    normalizeRoadMode,
+    drawRoadMode,
+    setNetworkTimings,
+    sideRoadLines: (elements, bounds, reach) => sideRoadLines(prepareRoadData(elements), makeFrame(bounds), reach, DROP_AREA_OUTLINES),
+    sidePositions,
     assertPlayableBoard,
     validateOverpassJson,
     fetchOverpassRoads,

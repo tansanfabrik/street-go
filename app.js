@@ -128,8 +128,18 @@
   }).addTo(map);
   mapEl.classList.add('map-style-light');
 
+  // Score view panes: the blocks (faces) a colour holds are filled between the tiles (200)
+  // and the roads (overlayPane, 400); the roads inside a colour's area are drawn over the
+  // roads and under the stones (markerPane, 600)
+  map.createPane('territoryFacePane').style.zIndex = '350';
+  map.createPane('territoryRoadPane').style.zIndex = '450';
+  map.getPane('territoryFacePane').style.pointerEvents = 'none';
+  map.getPane('territoryRoadPane').style.pointerEvents = 'none';
+
+  const territoryFaceLayer = L.layerGroup().addTo(map);
   const boundaryLayer = L.layerGroup().addTo(map);
   const edgeLayer = L.layerGroup().addTo(map);
+  const territoryRoadLayer = L.layerGroup().addTo(map);
   const nodeLayer = L.layerGroup().addTo(map);
 
   let currentBoardData = null;
@@ -137,6 +147,11 @@
   let nodeMarkers = new Map(); // id -> { marker, el, wrapper, tabIndex, label, size (px), dotScale, dotBorder }
   let edgePolylines = []; // { u, v, polyline }
   let showTerritory = false;
+  // Faces of the current board (computed once per board, the first time the score view is
+  // shown) and what the score view overlay shows now ('' = nothing drawn)
+  let boardFaces = null; // { board, faces }
+  let territorySignature = '';
+  let territoryPolylines = []; // { key, polyline, style }: score view road lines, highlighted with their road
   let highlightedLiberties = new Set();
   let highlightedEdgeKeys = new Set();
   let cpuThinking = false;
@@ -418,6 +433,27 @@
 
     const baseStyle = getBaseEdgeStyle();
     const edges = currentBoardData.edges;
+    const tails = Array.isArray(currentBoardData.tails) ? currentBoardData.tails : [];
+    const tailStyle = getTailStyle();
+    const casingColor = mapStyleSelect.value === 'dark' ? '#1f1f1f' : '#ffffff';
+    const casingOf = (style, extra) => ({
+      color: casingColor,
+      weight: style.weight + (style === tailStyle ? 1.5 : 2),
+      opacity: 1,
+      smoothFactor: 0,
+      interactive: false,
+      ...extra
+    });
+
+    // Draw order: every casing first, then every line, so a casing never covers a
+    // neighbouring road's line at a junction
+    for (const edge of edges) {
+      L.polyline(edge.coords, casingOf(baseStyle)).addTo(edgeLayer);
+    }
+    for (const t of tails) {
+      if (!Array.isArray(t.coords) || t.coords.length < 2) continue;
+      L.polyline(t.coords, casingOf(tailStyle)).addTo(edgeLayer);
+    }
 
     for (const edge of edges) {
       const polyline = L.polyline(edge.coords, {
@@ -435,8 +471,6 @@
 
     // Pieces of road drawn without points (short dead-end branches, points too close to
     // others): the road colour, thinner and lighter, no stone on them
-    const tails = Array.isArray(currentBoardData.tails) ? currentBoardData.tails : [];
-    const tailStyle = getTailStyle();
     for (const t of tails) {
       if (!Array.isArray(t.coords) || t.coords.length < 2) continue;
       L.polyline(t.coords, { ...tailStyle, smoothFactor: 0, interactive: false }).addTo(edgeLayer);
@@ -456,8 +490,10 @@
         smoothFactor: 0,
         interactive: false
       }).addTo(edgeLayer);
+      const overStyle = br.overTail ? tailStyle : baseStyle;
+      L.polyline(br.overCoords, casingOf(overStyle, { lineCap: 'butt' })).addTo(edgeLayer);
       const polyline = L.polyline(br.overCoords, {
-        ...(br.overTail ? tailStyle : baseStyle),
+        ...overStyle,
         lineCap: 'butt',
         smoothFactor: 0,
         interactive: false
@@ -465,6 +501,9 @@
       // highlighted together with its road
       if (over) edgePolylines.push({ key: edgeKey(over.u, over.v), u: over.u, v: over.v, polyline });
     }
+
+    // The score view's blocks and roads go with the roads (new board, map style)
+    refreshTerritoryOverlay();
   }
 
   function updateEdgeHighlights() {
@@ -473,6 +512,165 @@
     for (const item of edgePolylines) {
       item.polyline.setStyle(highlightedEdgeKeys.has(item.key) ? hiStyle : baseStyle);
     }
+    // The score view's road lines (and bridge tops drawn again over them) follow their road
+    for (const item of territoryPolylines) {
+      item.polyline.setStyle(highlightedEdgeKeys.has(item.key) ? hiStyle : item.style);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Score view overlay: the blocks a colour holds and the roads inside its area.
+  // A block (face of the road graph) belongs to X when every point on its edge is X's stone
+  // or X's territory; a road when both its ends are (board-faces.js).
+  const boardFacesApi = window.StreetGoFaces && typeof window.StreetGoFaces.computeBoardFaces === 'function'
+    ? window.StreetGoFaces
+    : null; // an older cached copy without board-faces.js: only the point marks are shown
+
+  function getTerritoryStyles() {
+    if (mapStyleSelect.value === 'dark') {
+      return {
+        B: {
+          face: { fillColor: '#000000', fillOpacity: 0.22 },
+          casing: { color: '#cfcfcc', weight: 4.8, opacity: 0.3 },
+          road: { color: '#000000', weight: 2.8, opacity: 0.5 }
+        },
+        W: {
+          face: { fillColor: '#ffffff', fillOpacity: 0.14 },
+          casing: null,
+          road: { color: '#ffffff', weight: 2.8, opacity: 0.6 }
+        }
+      };
+    }
+    return {
+      B: {
+        face: { fillColor: '#1f1f1f', fillOpacity: 0.1 },
+        casing: null,
+        road: { color: '#1f1f1f', weight: 2.8, opacity: 0.4 }
+      },
+      W: {
+        face: { fillColor: '#ffffff', fillOpacity: 0.28 },
+        // keeps the white road apart from the map's own white roads
+        casing: { color: '#5a5a58', weight: 4.8, opacity: 0.3 },
+        road: { color: '#ffffff', weight: 2.8, opacity: 0.7 }
+      }
+    };
+  }
+
+  // Faces of the current board, computed once per board
+  function getBoardFaces() {
+    if (!currentBoardData || !boardFacesApi) return [];
+    if (!boardFaces || boardFaces.board !== currentBoardData) {
+      let faces = [];
+      try {
+        faces = boardFacesApi.computeBoardFaces(currentBoardData).faces;
+      } catch (err) {
+        console.warn('Street Go: no blocks for the score view', err);
+      }
+      boardFaces = { board: currentBoardData, faces };
+    }
+    return boardFaces.faces;
+  }
+
+  function clearTerritoryOverlay() {
+    territoryFaceLayer.clearLayers();
+    territoryRoadLayer.clearLayers();
+    territoryPolylines = [];
+    territorySignature = '';
+  }
+
+  // Draw (or remove) the overlay for `score` (engine.computeScore()). Nothing is redrawn
+  // when the owners have not changed since the last call.
+  function renderTerritory(score) {
+    const shown = !!engine && (showTerritory || engine.gameOver);
+    if (!shown || !currentBoardData || !boardFacesApi || !score) {
+      if (territorySignature !== '') clearTerritoryOverlay();
+      return;
+    }
+    const faces = getBoardFaces();
+    const edges = Array.isArray(currentBoardData.edges) ? currentBoardData.edges : [];
+    const { faceOwners, edgeOwners } = boardFacesApi.territoryOwners(faces, edges, engine.board, score.territoryMap);
+    const sig = `${mapStyleSelect.value}|${faceOwners.map((o) => o || '-').join('')}|${edgeOwners.map((o) => o || '-').join('')}`;
+    if (sig === territorySignature) return;
+    clearTerritoryOverlay();
+    territorySignature = sig;
+
+    const styles = getTerritoryStyles();
+    faces.forEach((face, i) => {
+      const owner = faceOwners[i];
+      if (!owner || !Array.isArray(face.ring) || face.ring.length < 3) return;
+      L.polygon(face.ring, {
+        pane: 'territoryFacePane',
+        stroke: false,
+        fill: true,
+        ...styles[owner].face,
+        // a ring of a block next to a bridge may cross itself: fill every part it goes round
+        fillRule: 'nonzero',
+        smoothFactor: 0,
+        interactive: false
+      }).addTo(territoryFaceLayer);
+    });
+
+    // Roads: every casing first, then every line (as renderEdges does)
+    const owned = [];
+    edges.forEach((edge, i) => {
+      if (edgeOwners[i] && Array.isArray(edge.coords) && edge.coords.length >= 2) owned.push([edge, styles[edgeOwners[i]]]);
+    });
+    if (owned.length === 0) return;
+    const lineOpts = { pane: 'territoryRoadPane', smoothFactor: 0, interactive: false };
+    for (const [edge, st] of owned) {
+      if (st.casing) L.polyline(edge.coords, { ...st.casing, ...lineOpts }).addTo(territoryRoadLayer);
+    }
+    const hiStyle = getHighlightEdgeStyle();
+    const addLine = (coords, key, style, opts) => {
+      const polyline = L.polyline(coords, { ...style, ...opts }).addTo(territoryRoadLayer);
+      if (key) {
+        territoryPolylines.push({ key, polyline, style });
+        if (highlightedEdgeKeys.has(key)) polyline.setStyle(hiStyle);
+      }
+    };
+    for (const [edge, st] of owned) addLine(edge.coords, edgeKey(edge.u, edge.v), st.road, lineOpts);
+
+    // Bridges: the road below may now be drawn over the upper one, so the top of every
+    // bridge is drawn again here the way renderEdges draws it (the upper road in its score
+    // view colour when it has one)
+    const bridges = Array.isArray(currentBoardData.bridges) ? currentBoardData.bridges : [];
+    if (bridges.length === 0) return;
+    const ownerByKey = new Map();
+    edges.forEach((edge, i) => {
+      if (edgeOwners[i]) ownerByKey.set(edgeKey(edge.u, edge.v), edgeOwners[i]);
+    });
+    const baseStyle = getBaseEdgeStyle();
+    const tailStyle = getTailStyle();
+    const casingColor = mapStyleSelect.value === 'dark' ? '#1f1f1f' : '#ffffff';
+    for (const br of bridges) {
+      if (!Array.isArray(br.overCoords) || br.overCoords.length < 2) continue;
+      const over = br.overTail ? null : (br.overU !== undefined && br.overU !== null ? { u: br.overU, v: br.overV } : edges[br.over]);
+      if (!br.overTail && !over) continue;
+      const overStyle = br.overTail ? tailStyle : baseStyle;
+      const key = over ? edgeKey(over.u, over.v) : null;
+      const owner = key ? ownerByKey.get(key) : null;
+      const opts = { ...lineOpts, lineCap: 'butt' };
+      L.polyline(br.overCoords, { color: getMapBackgroundColor(), weight: 8, opacity: 1, ...opts }).addTo(territoryRoadLayer);
+      L.polyline(br.overCoords, {
+        color: casingColor,
+        weight: overStyle.weight + (overStyle === tailStyle ? 1.5 : 2),
+        opacity: 1,
+        ...opts
+      }).addTo(territoryRoadLayer);
+      if (owner) {
+        const st = styles[owner];
+        if (st.casing) L.polyline(br.overCoords, { ...st.casing, ...opts }).addTo(territoryRoadLayer);
+        addLine(br.overCoords, key, st.road, opts);
+      } else {
+        addLine(br.overCoords, key, overStyle, opts);
+      }
+    }
+  }
+
+  // Redraw the overlay from scratch (new board, map style, roads redrawn)
+  function refreshTerritoryOverlay() {
+    clearTerritoryOverlay();
+    if (engine && currentBoardData) renderTerritory(engine.computeScore());
   }
 
   // Create Node Markers once per generated board
@@ -755,6 +953,9 @@
       el.className = classes.join(' ');
     }
 
+    // Score view: blocks and roads held by a colour (redrawn only when they change)
+    renderTerritory(score);
+
     // Update Sidebar Stats
     blackStonesEl.textContent = score.blackStones;
     blackCapturesEl.textContent = score.blackCaptures;
@@ -990,14 +1191,16 @@
     return !!b && [b.south, b.west, b.north, b.east].every(Number.isFinite) && b.north > b.south && b.east > b.west;
   }
 
-  // The board frame: a drawn range as drawn; for a place, its points and lines with a small
-  // margin, cut to the square the roads were cut to (frameBounds). Roads leaving the range
-  // end at their last junction inside. The mask and the fit use the same rectangle.
+  // The board frame (frameBounds): its points and lines with a small margin, cut to the
+  // rectangle the roads were cut to. For a drawn range that rectangle is the drawn one with
+  // its sides moved to the nearest ring of roads, so the frame may reach past the drawn
+  // range. Roads leaving the range end at their last junction inside. The mask and the fit
+  // use the same rectangle.
   function boardRect() {
     if (!currentBoardData || currentBoardData.nodes.size === 0) return null;
-    if (isRect(currentBoardData.customBounds)) return currentBoardData.customBounds;
     if (isRect(currentBoardData.frameBounds)) return currentBoardData.frameBounds;
     if (isRect(currentBoardData.boardBounds)) return currentBoardData.boardBounds;
+    if (isRect(currentBoardData.customBounds)) return currentBoardData.customBounds;
     return null;
   }
 
@@ -1069,7 +1272,8 @@
     const { nodeCount, edgeCount, avgDegree, maxDegree } = boardData.stats;
     boardStatsEl.textContent = `${nodeCount}交点 / ${edgeCount}道 (平均${avgDegree}・最大${maxDegree}叉路)`;
     const quality = boardData.stats.quality;
-    const warnings = quality && Array.isArray(quality.warnings) ? quality.warnings : [];
+    const warnings = (quality && Array.isArray(quality.warnings) ? quality.warnings : [])
+      .concat(Array.isArray(boardData.stats.notices) ? boardData.stats.notices : []);
     // Settle the sidebar height before measuring the map: the new game state (an old result
     // box goes away) and the yellow status bar, which setLoading(false) hides later in this
     // same task anyway. Stacked layouts otherwise fit the board into a map that then grows,
@@ -1088,6 +1292,32 @@
     // Close the panel first, then re-measure the map, then fit (a stale size leaves the board small)
     closeSetupIfCompact();
     fitBoard();
+    flashDrawnRect(boardData.drawnBounds);
+  }
+
+  // A drawn range: the rectangle as drawn stays on the map for a moment (0.6 s) over the new
+  // board, whose frame may reach past it (the sides moved to the nearest ring of roads)
+  let drawnFlash = null;
+  function flashDrawnRect(b) {
+    if (drawnFlash) {
+      clearTimeout(drawnFlash.timer);
+      map.removeLayer(drawnFlash.layer);
+      drawnFlash = null;
+    }
+    if (!isRect(b)) return;
+    const layer = L.rectangle([[b.south, b.west], [b.north, b.east]], {
+      color: mapStyleSelect.value === 'dark' ? '#f7f7f6' : '#1f1f1f',
+      weight: 1.5,
+      fill: false,
+      dashArray: '6 4',
+      interactive: false
+    }).addTo(map);
+    const flash = { layer, timer: null };
+    flash.timer = setTimeout(() => {
+      map.removeLayer(layer);
+      if (drawnFlash === flash) drawnFlash = null;
+    }, 600);
+    drawnFlash = flash;
   }
 
   function getBoardOptions() {
@@ -1129,6 +1359,10 @@
     } catch (err) {
       if (isAbortError(err)) {
         showToast('生成をキャンセルしました');
+      } else if (err && err.kind === 'small-board' && err.board && !controller.signal.aborted) {
+        // Only a board of fewer than 9 points was found: used if the player says so
+        if (window.confirm(err.message)) applyGeneratedBoard(err.board, label);
+        else showToast('盤面の生成をやめました');
       } else {
         showError((err && err.message) || '盤面の生成中にエラーが発生しました。');
       }
@@ -1363,7 +1597,9 @@
       drawPreviewRect.setBounds(leafletBounds);
     }
 
-    drawSizeLabel.textContent = window.StreetGoMap.formatRectSize(drawn.widthM, drawn.heightM);
+    // wider ranges are made from the major roads only (see drawRoadMode)
+    const major = drawn.check.ok && Math.max(drawn.widthM, drawn.heightM) > window.StreetGoMap.DRAW_SIMPLE_MAX_M;
+    drawSizeLabel.textContent = window.StreetGoMap.formatRectSize(drawn.widthM, drawn.heightM) + (major ? '・大通りのみ' : '');
     return drawn;
   }
 
