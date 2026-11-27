@@ -226,7 +226,7 @@
   }
 
   // Marker size per zoom level (13 -> 13 px ... 18 -> 36 px), interpolated for fractional zoom
-  const NODE_PX_BY_ZOOM = [[13, 13], [14, 17], [15, 22], [16, 27], [17, 32], [18, 36]];
+  const NODE_PX_BY_ZOOM = [[13, 16], [14, 20], [15, 26], [16, 32], [17, 38], [18, 43]];
 
   function getNodePixelSize() {
     const z = map.getZoom();
@@ -339,10 +339,16 @@
   function getBaseEdgeStyle() {
     const isDark = mapStyleSelect.value === 'dark';
     return {
-      color: isDark ? '#f7f7f6' : '#1f1f1f',
+      color: isDark ? '#cfcfcc' : '#5a5a58',
       weight: 2.2,
-      opacity: isDark ? 0.6 : 0.7
+      opacity: isDark ? 0.6 : 0.8
     };
+  }
+
+  // Drawn-only pieces: the road colour at half the width and half the opacity
+  function getTailStyle() {
+    const base = getBaseEdgeStyle();
+    return { color: base.color, weight: base.weight / 2, opacity: 0.5 };
   }
 
   function getHighlightEdgeStyle() {
@@ -354,7 +360,8 @@
     };
   }
 
-  // Render Board Boundary as a clean rectangular board frame + dimmed outside mask
+  // Render Board Boundary as a rectangular board frame + dimmed outside mask. The frame is a
+  // thin dashed line, so it does not read as a road.
   function renderBoundary() {
     boundaryLayer.clearLayers();
     if (!currentBoardData || currentBoardData.nodes.size === 0) return;
@@ -384,26 +391,35 @@
       interactive: false
     }).addTo(boundaryLayer);
 
-    // Crisp straight-line board border
+    // Board border: thinner and lighter than a road, dashed
     L.polygon(rectRing, {
       fill: false,
-      color: isDark ? '#f7f7f6' : '#1f1f1f',
-      weight: 1.5,
-      opacity: 0.9,
+      color: isDark ? '#cfcfcc' : '#5a5a58',
+      weight: 1,
+      opacity: 0.7,
+      dashArray: '5 5',
       lineJoin: 'miter',
       interactive: false
     }).addTo(boundaryLayer);
   }
 
-  // Render Road Edges
+  // Map background behind the roads (for the gap a bridge cuts into the road below it)
+  function getMapBackgroundColor() {
+    return mapStyleSelect.value === 'dark' ? '#2b2b2a' : '#f7f7f6';
+  }
+
+  // Render Road Edges. Roads crossing without a shared point (bridges, overpasses) are not
+  // joined: the upper road is drawn again over the crossing with a casing in the map's
+  // background colour, which leaves a small gap in the road below.
   function renderEdges() {
     edgeLayer.clearLayers();
     edgePolylines = [];
     if (!currentBoardData) return;
 
     const baseStyle = getBaseEdgeStyle();
+    const edges = currentBoardData.edges;
 
-    for (const edge of currentBoardData.edges) {
+    for (const edge of edges) {
       const polyline = L.polyline(edge.coords, {
         ...baseStyle,
         smoothFactor: 0, // draw the shape map-graph chose, without dropping small bends
@@ -415,6 +431,39 @@
         v: edge.v,
         polyline
       });
+    }
+
+    // Pieces of road drawn without points (short dead-end branches, points too close to
+    // others): the road colour, thinner and lighter, no stone on them
+    const tails = Array.isArray(currentBoardData.tails) ? currentBoardData.tails : [];
+    const tailStyle = getTailStyle();
+    for (const t of tails) {
+      if (!Array.isArray(t.coords) || t.coords.length < 2) continue;
+      L.polyline(t.coords, { ...tailStyle, smoothFactor: 0, interactive: false }).addTo(edgeLayer);
+    }
+
+    const bridges = Array.isArray(currentBoardData.bridges) ? currentBoardData.bridges : [];
+    for (const br of bridges) {
+      if (!Array.isArray(br.overCoords) || br.overCoords.length < 2) continue;
+      // older data: the upper line is a road edge given by its index
+      const over = br.overTail ? null : (br.overU !== undefined && br.overU !== null ? { u: br.overU, v: br.overV } : edges[br.over]);
+      if (!br.overTail && !over) continue;
+      L.polyline(br.overCoords, {
+        color: getMapBackgroundColor(),
+        weight: 8,
+        opacity: 1,
+        lineCap: 'butt',
+        smoothFactor: 0,
+        interactive: false
+      }).addTo(edgeLayer);
+      const polyline = L.polyline(br.overCoords, {
+        ...(br.overTail ? tailStyle : baseStyle),
+        lineCap: 'butt',
+        smoothFactor: 0,
+        interactive: false
+      }).addTo(edgeLayer);
+      // highlighted together with its road
+      if (over) edgePolylines.push({ key: edgeKey(over.u, over.v), u: over.u, v: over.v, polyline });
     }
   }
 
@@ -473,7 +522,18 @@
           // (stones included; focusing shows the liberties like hovering does)
           e.preventDefault();
           e.stopPropagation();
+          cyclePivot = null;
           const next = neighborInDirection(id, ARROW_DIRECTIONS[e.key]);
+          if (next !== null) {
+            const target = nodeMarkers.get(next);
+            if (target) target.wrapper.focus();
+          }
+        } else if (e.key === ']' || e.key === '[') {
+          // ] / [ go round every point joined to this one (clockwise / anticlockwise) and back:
+          // points with 5 or more roads have neighbours no arrow key reaches. Stones included.
+          e.preventDefault();
+          e.stopPropagation();
+          const next = cycleNeighbor(id, e.key === ']' ? 1 : -1);
           if (next !== null) {
             const target = nodeMarkers.get(next);
             if (target) target.wrapper.focus();
@@ -483,6 +543,32 @@
       wrapper.addEventListener('focus', () => handleNodeHover(id));
       wrapper.addEventListener('blur', () => handleNodeLeave());
     }
+  }
+
+  // The point whose neighbours the ] / [ keys go round (null: start at the focused point)
+  let cyclePivot = null;
+
+  function cycleNeighbor(id, step) {
+    if (!currentBoardData) return null;
+    const nodes = currentBoardData.nodes;
+    // keep going round the same point while the focus is on it or one of its neighbours
+    if (cyclePivot === null || !nodes.has(cyclePivot) || (cyclePivot !== id && !nodes.get(cyclePivot).neighbors.has(id))) {
+      cyclePivot = id;
+    }
+    const pivot = nodes.get(cyclePivot);
+    if (!pivot || pivot.neighbors.size === 0) return null;
+    const c = map.latLngToContainerPoint([pivot.lat, pivot.lon]);
+    const around = Array.from(pivot.neighbors).map((nb) => {
+      const n = nodes.get(nb);
+      const p = map.latLngToContainerPoint([n.lat, n.lon]);
+      return { id: nb, x: p.x, y: p.y };
+    });
+    const order = window.StreetGoMap.neighborsClockwise
+      ? window.StreetGoMap.neighborsClockwise({ x: c.x, y: c.y }, around)
+      : around.map((n) => n.id);
+    return window.StreetGoMap.nextInCycle
+      ? window.StreetGoMap.nextInCycle(cyclePivot, order, id, step)
+      : order[0];
   }
 
   // Screen directions for the arrow keys (container pixels, y grows downwards)
@@ -517,9 +603,13 @@
     return best;
   }
 
+  // What a point is: a junction ("3叉路"), a dead end (one road), or a point in the middle of
+  // a road (loops, a second route, long roads)
   function nodeKindLabel(node) {
     const deg = node.neighbors.size;
-    return node.isMidpoint ? '道路の中間点' : (deg === 1 ? '行き止まり' : `${deg}叉路`);
+    if (node.kind === 'deadEnd') return '行き止まり';
+    if (node.kind === 'shape' || node.kind === 'midpoint' || node.isMidpoint) return '道路の中間点';
+    return deg === 1 ? '行き止まり' : `${deg}叉路`;
   }
 
   // --- Game mode helpers (the pure rules live in go-engine.js) ---
@@ -900,52 +990,15 @@
     return !!b && [b.south, b.west, b.north, b.east].every(Number.isFinite) && b.north > b.south && b.east > b.west;
   }
 
-  // The points and drawn roads of the board, with a margin of max(22 m, 4.5 %)
-  function paddedBoardExtent() {
-    let minLat = Infinity;
-    let maxLat = -Infinity;
-    let minLon = Infinity;
-    let maxLon = -Infinity;
-    for (const n of currentBoardData.nodes.values()) {
-      if (n.lat < minLat) minLat = n.lat;
-      if (n.lat > maxLat) maxLat = n.lat;
-      if (n.lon < minLon) minLon = n.lon;
-      if (n.lon > maxLon) maxLon = n.lon;
-    }
-    for (const e of currentBoardData.edges) {
-      for (const [lat, lon] of e.coords) {
-        if (lat < minLat) minLat = lat;
-        if (lat > maxLat) maxLat = lat;
-        if (lon < minLon) minLon = lon;
-        if (lon > maxLon) maxLon = lon;
-      }
-    }
-    if (!(maxLat >= minLat && maxLon >= minLon)) return null;
-    const midLat = (minLat + maxLat) / 2;
-    const cosLat = Math.max(0.2, Math.cos((midLat * Math.PI) / 180));
-    const padLat = Math.max(22 / 111000, (maxLat - minLat) * 0.045);
-    const padLon = Math.max(22 / (111000 * cosLat), (maxLon - minLon) * 0.045);
-    return { south: minLat - padLat, north: maxLat + padLat, west: minLon - padLon, east: maxLon + padLon };
-  }
-
-  // The board frame. A drawn range is the frame as drawn. Otherwise the frame is the board's
-  // points and roads with a small margin, cut to the square the board was made from
-  // (boardBounds): a road left out of the board never shows inside the frame, and empty
-  // parts of the square stay outside it.
+  // The board frame: a drawn range as drawn; for a place, its points and lines with a small
+  // margin, cut to the square the roads were cut to (frameBounds). Roads leaving the range
+  // end at their last junction inside. The mask and the fit use the same rectangle.
   function boardRect() {
     if (!currentBoardData || currentBoardData.nodes.size === 0) return null;
     if (isRect(currentBoardData.customBounds)) return currentBoardData.customBounds;
-    const ext = paddedBoardExtent();
-    const b = currentBoardData.boardBounds;
-    if (!isRect(b)) return ext;
-    if (!ext) return b;
-    const r = {
-      south: Math.max(ext.south, b.south),
-      north: Math.min(ext.north, b.north),
-      west: Math.max(ext.west, b.west),
-      east: Math.min(ext.east, b.east)
-    };
-    return isRect(r) ? r : b;
+    if (isRect(currentBoardData.frameBounds)) return currentBoardData.frameBounds;
+    if (isRect(currentBoardData.boardBounds)) return currentBoardData.boardBounds;
+    return null;
   }
 
   // Fit to the same rectangle the frame is drawn on, so the whole frame is on screen
@@ -1015,6 +1068,8 @@
 
     const { nodeCount, edgeCount, avgDegree, maxDegree } = boardData.stats;
     boardStatsEl.textContent = `${nodeCount}交点 / ${edgeCount}道 (平均${avgDegree}・最大${maxDegree}叉路)`;
+    const quality = boardData.stats.quality;
+    const warnings = quality && Array.isArray(quality.warnings) ? quality.warnings : [];
     // Settle the sidebar height before measuring the map: the new game state (an old result
     // box goes away) and the yellow status bar, which setLoading(false) hides later in this
     // same task anyway. Stacked layouts otherwise fit the board into a map that then grows,
@@ -1024,7 +1079,11 @@
 
     // The notice first: on narrow screens it sits at the top of the map and the fit
     // keeps the board below it
-    showToast(`${label}の盤面（${nodeCount}交点）を生成しました`);
+    if (warnings.length > 0) {
+      showToast(`${label}の盤面（${nodeCount}交点）を生成しました。${warnings.join('')}`, 6000);
+    } else {
+      showToast(`${label}の盤面（${nodeCount}交点）を生成しました`);
+    }
 
     // Close the panel first, then re-measure the map, then fit (a stale size leaves the board small)
     closeSetupIfCompact();

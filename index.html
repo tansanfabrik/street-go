@@ -12,13 +12,13 @@
   <link rel="canonical" href="https://street-go.tansanfabrik.com/" />
   <meta name="twitter:card" content="summary" />
   <meta name="theme-color" content="#f7f7f6" />
-  <link rel="icon" type="image/svg+xml" href="favicon.svg?v=13" />
+  <link rel="icon" type="image/svg+xml" href="favicon.svg?v=16" />
   <link
     rel="stylesheet"
-    href="vendor/leaflet/leaflet.css?v=13"
+    href="vendor/leaflet/leaflet.css?v=16"
     integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
   />
-  <link rel="stylesheet" href="style.css?v=13" />
+  <link rel="stylesheet" href="style.css?v=16" />
 </head>
 <body>
   <div id="app">
@@ -176,9 +176,10 @@
             <p class="hint">大通りの二重交差点などを1点にまとめます</p>
           </div>
           <label class="checkbox-row">
-            <input type="checkbox" id="include-deadends" />
-            <span>行き止まり（呼吸点1）も含める</span>
+            <input type="checkbox" id="include-deadends" checked aria-describedby="deadends-hint" />
+            <span>行き止まりの道も含める</span>
           </label>
+          <p class="hint checkbox-hint" id="deadends-hint">オフにすると、行き止まりの道を除きます。範囲の外へ続く道の手前の交差点は残ります</p>
           <label class="checkbox-row">
             <input type="checkbox" id="include-footways" autocomplete="off" />
             <span>歩道・路地も含める</span>
@@ -241,10 +242,28 @@
         <li>この数え方は中国ルールと呼ばれます。取った石（アゲハマ）は点に入りません。</li>
         <li>コミは、先に打つ黒が有利な分を埋め合わせるために、白へ加える点です。0.5 の端数があるので、引き分けにはなりません。</li>
       </ul>
+      <h3>盤面のつくり方</h3>
+      <ul>
+        <li>範囲の中にある車道を、地図のとおりに使います。歩道、小道、階段、自転車道、敷地内の通路、トンネル、屋根付きの通路は使いません（アーケードの商店街は使います）。</li>
+        <li>道どうしが交わる所と、行き止まりの先に、石を置く点を置きます。</li>
+        <li>範囲の外へ続く道は、範囲の中の最後の交差点までを使い、そこから先は盤にしません。その交差点の点は残します（外周から外へ飛び出す場合を除きます）。</li>
+        <li>地名から盤をつくるときは、範囲の辺が道と重なったり並んだりしないよう、範囲の位置を少しずらすことがあります。</li>
+        <li>30m 以内にある交差点は1つにまとめ、実際の交差点のどれかの上に点を置きます。まとめる距離は詳細設定の「交差点の統合距離」で変えられます。</li>
+        <li>上下線のように並んで走る道と、重なった線は、1本の線にまとめて描きます。</li>
+        <li>入口が1つしかない小さな輪(周囲 150m 未満)は使いません。</li>
+        <li>屋根付きの道などで少しだけ途切れた道は、向かい合っていれば1本につなぎます。</li>
+        <li>短い行き止まりの枝(12m 未満)には点を置かず、細く薄い線で描きます。</li>
+        <li>道でつながっていない点どうしが 8m 未満で並ぶときは、短い行き止まり(40m 未満)の側の点を置かず、細く薄い線で描きます。</li>
+        <li>広場の外周の線は使いません。</li>
+        <li>盤の外周は道でできた輪になるようにし、外周から外へ飛び出す行き止まりの道と、ほかとつながっていない道は使いません。外周の内側の行き止まりは使います。</li>
+      </ul>
       <h3>この盤ならではのルール</h3>
       <ul>
         <li>盤は碁盤の目ではなく、街の道路です。交点が石を置く場所で、交点から出ている道の数が、石を置いたときの呼吸点の最大数になります。</li>
-        <li>盤面を単純にするため、1つの交点につながる道は原則4本までにし、立体交差などで交わる道は一部を外しています。地図の道と盤の線が違うときは、盤の線に従います。</li>
+        <li>1つの点につながる道の数に上限はありません。地図の道と盤の線が違うときは、盤の線に従います。</li>
+        <li>高架などで、点を共有せずに交わる道はつながっていません。上の道を続けて描き、下の道に小さな切れ目を入れています。</li>
+        <li>細く薄い線は道の一部ですが、石を置く点はありません（短い行き止まりなど）。</li>
+        <li>盤がいくつかのまとまりに分かれることがあります。離れたまとまりも同じ盤の一部として打ち、終局時はすべてを合わせて数えます。</li>
         <li>コミは交点数で決まります。20未満は0.5目、20以上40未満は2.5目、40以上70未満は4.5目、70以上は6.5目です。</li>
         <li>以前と同じ石の配置に戻る手は打てません。直前の盤面だけでなく、その対局で現れたすべての配置が対象です。</li>
         <li>死石の判定はしません。終局時に盤上に残った石は、すべて生きた石として数えます。取れる石は取り切ってからパスしてください。</li>
@@ -253,6 +272,7 @@
       <ul>
         <li>石にカーソルを合わせるか、石をタップすると、その連の残りの呼吸点が光ります。</li>
         <li>キーボードでは、Tab キーで空いている交点に移動し、Enter キーかスペースキーで石を置きます。</li>
+        <li>矢印キーで、道でつながった隣の交点へ移ります。] キーを押すと、その交点につながるすべての交点を時計回りに順に選び、最後に元の交点へ戻ります（[ キーは反時計回り）。石のある交点も選べます。</li>
         <li>詳細設定の「対戦モード」で、CPU 対戦の先手（黒）と後手（白）、または2人での対人戦を選べます。</li>
       </ul>
       <h3>データと通信</h3>
@@ -268,11 +288,11 @@
   </dialog>
 
   <script
-    src="vendor/leaflet/leaflet.js?v=13"
+    src="vendor/leaflet/leaflet.js?v=16"
     integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
   ></script>
-  <script src="map-graph.js?v=13"></script>
-  <script src="go-engine.js?v=13"></script>
-  <script src="app.js?v=13"></script>
+  <script src="map-graph.js?v=16"></script>
+  <script src="go-engine.js?v=16"></script>
+  <script src="app.js?v=16"></script>
 </body>
 </html>

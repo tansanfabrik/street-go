@@ -14,13 +14,85 @@
 
   const MIN_BOARD_NODES = 9;
   const DEFAULT_MERGE_RADIUS_M = 30;
-  const MAX_NODE_DEGREE = 4;
-  const SQUARE_MARGINS_M = [15, 10, 5, 1]; // auto square: margin past the outermost junction, widest first
-  const SQUARE_MARGIN_MAX_RATIO = 1.15; // ...as long as the board has at most this x targetNodes points
-  const SQUARE_MARGIN_MIN_RATIO = 0.85; // ...and at least this x targetNodes points
-  const EARLY_TOO_MANY_FACTOR = 3; // abort before simplification above 3 x MAX_BOARD_NODES
+  const SQUARE_MAX_RATIO = 1.15; // auto square: the board aims at 0.85..1.15 x targetNodes points
+  const SQUARE_MIN_RATIO = 0.85;
+  const EARLY_TOO_MANY_FACTOR = 3; // abort before the heavier steps above 3 x MAX_BOARD_NODES
   const MAX_BOARD_NODES = 450;
   const MAX_OVERPASS_ELEMENTS = 200000;
+
+  // ---------------------------------------------------------------------------
+  // Board generation thresholds (metres unless stated). The steps they belong to are
+  // described at buildBoardGen.
+  const SHIFT_MAX_M = 80; // a place's square: its centre may move this far east-west / north-south ...
+  const SHIFT_STEP_M = 20; // ... in steps of this
+  const SHIFT_NEAR_M = 30; // roads this close to a side ...
+  const SHIFT_ANGLE_DEG = 20; // ... and this close to its direction run along it
+  const SHIFT_PIECE_M = 5; // (measured on road pieces of at most this length)
+  const SHIFT_MAX_BUILDS = 2; // moved squares built at most
+  const SHIFT_JUNCTION_SHARE = 0.2; // a moved square is built only if its raw junctions stay within this share
+  const FRAME_PAD_M = 22; // a place's frame: margin around its points and lines ...
+  const FRAME_PAD_SHARE = 0.045; // ... or this share of their extent, if larger
+  const FIRST_RADIUS_PER_SQRT_M = 95; // first road request for a place: radius = this x sqrt(target)
+
+  // clipping, links, merging, side-by-side roads, loops, parts, dead ends
+  const CLAMP_TOL_M = 1; // points this close to the rectangle's outline (outside or inside) are put on it
+  const CUT_EPS_M = 1e-6; // shorter clipped stretches (a corner touch) are dropped
+  const ZERO_SEG_M = 0.01; // consecutive points closer than this are one point
+  const MAX_CLIPPED_SEGMENTS = 60000; // road segments inside the rectangle
+  const PARALLEL_WITHIN_M = 12; // two roads this close ...
+  const PARALLEL_MIN_RUN_M = 25; // ... over this length run together (one centre line)
+  const PARALLEL_SHARED_M = 15; // the stretch around a point both roads start from does not count
+  const PARALLEL_END_SNAP_M = 15; // a run ending this close (or within the merge radius) to a road's end ends at that point
+  const PARALLEL_COS = Math.cos((30 * Math.PI) / 180); // directions within 30 degrees
+  const PARALLEL_MAX_PAIRS = 200000; // candidate road pairs per pass
+  const PARALLEL_LINK_M = 2 * PARALLEL_WITHIN_M; // see mergeParallelRoads
+  const COINCIDENT_M = 1; // two lines this close lie on top of each other ...
+  const COINCIDENT_MIN_RUN_M = 10; // ... and are one line over such a stretch, even from a shared point
+  const PARALLEL_MAX_MERGES = 3000;
+  const DUPLICATE_ROUTE_M = 15; // two roads between the same points this close everywhere are one
+  const LOOP_MIN_M = 30; // a loop shorter than this is part of its point
+  const SMALL_LOOP_M = 150; // a loop with one way in, shorter than this, is left out
+  const SMALL_ROUTES_M = 150; // two routes between two points, together shorter: the shorter stays
+  const SHORT_ROUTE_M = 80; // ... and so when both are shorter than this
+  const FACING_MAX_M = 25; // two dead ends this close, facing each other, are one road
+  const FACING_MAX_DEG = 25;
+  const SHORT_SPUR_M = 12; // a dead-end branch shorter than this has no point at its end (drawn only)
+  const TAIL_MAX_M = 40; // a piece this long or longer keeps its point (never drawn only)
+  const END_GAP_M = 8; // points closer than this that no road joins: one is drawn only
+  const MIN_POINT_GAP_M = 1; // see collapseTinyGaps
+  const END_MOVE_DEV_M = 3; // a road end moved to its merged point may take the line this far off the road
+  const MOVE_MAX_DEV_M = 8; // a point moved onto a centre line may take its other roads this far off
+  const RING_TOL_M = 0.5; // a dead-end branch this close to the board's outline is inside it
+  const BRIDGE_HALF_M = 7; // length of the upper road drawn over a crossing, each side
+  const OVERLAP_WITHIN_M = 3; // two roads from a common point this close from a crossing to it ...
+  const OVERLAP_MAX_M = 60; // ... over at most this length run together there (no bridge)
+  // Leave out closed ways that look like area outlines (see isAreaOutline): the data has no
+  // tags to tell a plaza outline from a loop road (options.dropAreaOutlines overrides).
+  const DROP_AREA_OUTLINES = true;
+  const AREA_SHARP_CORNERS = 4;
+
+  // drawn shapes (buildDisplayShapes)
+  const SHAPE_STRAIGHT_DEV_M = 4; // road within this of its chord -> straight line
+  const SHAPE_END_ZONE_M = 25; // bends this close to a junction may be dropped...
+  const SHAPE_END_DEV_M = 2.5; // ...if the line stays within this of the road there
+  const SHAPE_DP_TOL_M = 2.5; // Douglas-Peucker tolerance for the rest of the road
+  const SHAPE_NEAR_NODE_M = 8; // a line must not newly pass this close to another point
+  const SHAPE_OVERLAP_M = 10; // two lines this close over a long stretch run together
+  const SHAPE_OVERLAP_MIN_M = 20;
+  const SHAPE_OVERLAP_SHARED_M = 15; // ignored around a point both lines start from
+  const SHAPE_TOUCH_M = 1; // where two lines meet at a shared point
+  const SHAPE_SLACK_M = 1; // borderline cases count against the simpler shape
+  const SHAPE_MIN_LEN_M = 0.5; // a drawn line never gets shorter than this
+
+  // merged points moved onto their road (alignPointsOntoRoads)
+  const ALIGN_ON_ROAD_M = 5;
+  const ALIGN_CARRIAGEWAY_M = 20; // the other carriageway stays this close to the road
+  const ALIGN_MAX_APPLIED = 200;
+  const ALIGN_MAX_REJECTED = 400; // candidates that failed the checks (bounds the work)
+  const ALIGN_NARROW_DEG = 15;
+  const ALIGN_KINK_MIN_DEG = 135; // second form: A-B-C bends by at most 45 degrees at B
+  const ALIGN_KINK_ON_LINE_M = 8; // ...the junction the road passes is this close to A-C
+  const ALIGN_KINK_MIN_OFFSET_M = 5; // ...and merging moved B at least this much further off
 
   // Drawn board area (a rectangle; Shift + mouse drag makes it a square)
   const MIN_DRAW_SIDE_PX = 15; // shorter side on screen
@@ -273,7 +345,9 @@
     for (const p of PRESETS) p.loaded = false;
   }
 
-  // Validate an Overpass JSON response. Throws on incomplete / oversized data.
+  // Validate an Overpass JSON response. Throws on incomplete / oversized data: a remark
+  // (the server cut the query short) and a way that refers to a node missing from the
+  // response both mean some roads would be missing, so no board is made from it.
   // Returns { elements, cacheable }.
   function validateOverpassJson(json) {
     if (!json || !Array.isArray(json.elements)) {
@@ -281,19 +355,34 @@
     }
     const elements = json.elements;
     const remark = typeof json.remark === 'string' && json.remark.trim() !== '' ? json.remark : null;
-    if (remark && elements.length === 0) {
+    if (remark) {
       throw new StreetGoError('incomplete', '道路データの応答が不完全でした（サーバー側で処理が打ち切られました）。しばらく待って再試行してください。');
     }
     if (elements.length > MAX_OVERPASS_ELEMENTS) {
       throw new StreetGoError('too-many', `道路データが多すぎます（${elements.length}要素）。範囲を狭めてください`);
     }
+    const nodeIds = new Set();
     for (const el of elements) {
-      if (el && el.type === 'node' && !(Number.isFinite(el.lat) && Number.isFinite(el.lon))) {
-        throw new StreetGoError('incomplete', '道路データの応答が不完全でした（座標が欠けています）。しばらく待って再試行してください。');
+      if (el && el.type === 'node') {
+        if (!(Number.isFinite(el.lat) && Number.isFinite(el.lon))) {
+          throw new StreetGoError('incomplete', '道路データの応答が不完全でした（座標が欠けています）。しばらく待って再試行してください。');
+        }
+        nodeIds.add(el.id);
       }
     }
-    // A remark means the server cut the query short; use the data but never cache it.
-    return { elements, cacheable: !remark };
+    for (const el of elements) {
+      if (el && el.type === 'way' && (!Array.isArray(el.nodes) || el.nodes.length < 2)) {
+        throw new StreetGoError('incomplete', '道路データの応答が不完全でした（道の点の一覧が欠けています）。しばらく待って再試行してください。');
+      }
+      if (el && el.type === 'way' && Array.isArray(el.nodes)) {
+        for (const nid of el.nodes) {
+          if (!nodeIds.has(nid)) {
+            throw new StreetGoError('incomplete', '道路データの応答が不完全でした（道の点が欠けています）。しばらく待って再試行してください。');
+          }
+        }
+      }
+    }
+    return { elements, cacheable: true };
   }
 
   function assertPlayableBoard(nodeCount) {
@@ -492,14 +581,14 @@
   // ---------------------------------------------------------------------------
   // Stone marker helpers (pure, screen pixels; used by app.js and the tests)
 
-  // Diameter of one point's marker: the zoom's base size, but no more than 80% of the
+  // Diameter of one point's marker: the zoom's base size, but no more than 88% of the
   // screen distance to the nearest road-connected neighbour (so stones at both ends of a
   // short road leave the road visible), and never below 70% of the base size.
   // A point without a usable neighbour distance keeps the base size. Whole pixels.
   function stoneDiameterPx(basePx, nearestNeighborPx) {
     if (!(basePx > 0)) return 0;
     if (!Number.isFinite(nearestNeighborPx) || nearestNeighborPx < 0) return Math.round(basePx);
-    const d = Math.min(basePx, Math.max(basePx * 0.7, nearestNeighborPx * 0.8));
+    const d = Math.min(basePx, Math.max(basePx * 0.7, nearestNeighborPx * 0.88));
     return Math.round(d);
   }
 
@@ -550,6 +639,31 @@
     return best;
   }
 
+  // Keyboard: the neighbours of a point in clockwise order on screen, starting from straight
+  // up (screen pixels, y downwards). center { x, y }; neighbours [{ id, x, y }]. Returns ids.
+  function neighborsClockwise(center, neighbors) {
+    const withAngle = neighbors
+      .filter((n) => n && Number.isFinite(n.x) && Number.isFinite(n.y))
+      .map((n) => {
+        // angle from "up", growing clockwise (east = 90 degrees)
+        let a = Math.atan2(n.x - center.x, center.y - n.y);
+        if (a < 0) a += 2 * Math.PI;
+        return { id: n.id, a };
+      });
+    withAngle.sort((p, q) => p.a - q.a || (String(p.id) < String(q.id) ? -1 : 1));
+    return withAngle.map((n) => n.id);
+  }
+
+  // The point focus moves to with the cycle keys: around `pivot`, through its neighbours in
+  // clockwise order (step 1) or anticlockwise (step -1) and back to the pivot itself.
+  // order: neighborsClockwise of the pivot; current: the focused point id.
+  function nextInCycle(pivot, order, current, step) {
+    const ring = order.concat([pivot]);
+    const i = ring.indexOf(current);
+    if (i < 0) return step > 0 ? ring[0] : ring[ring.length - 2] !== undefined ? ring[ring.length - 2] : pivot;
+    return ring[(i + (step > 0 ? 1 : ring.length - 1)) % ring.length];
+  }
+
   function polylineLength(coords) {
     let total = 0;
     for (let i = 1; i < coords.length; i++) {
@@ -565,130 +679,8 @@
     return distanceMeters(a[0], a[1], rawEnds[0][0], rawEnds[0][1]) + distanceMeters(b[0], b[1], rawEnds[1][0], rawEnds[1][1]);
   }
 
-  // Split a polyline into `numSegments` equal-length parts and return sub-polylines
-  function splitPolyline(coords, numSegments) {
-    const totalLen = polylineLength(coords);
-    if (numSegments <= 1 || totalLen <= 0) return [coords];
 
-    const segLen = totalLen / numSegments;
-    const parts = [];
-    let currentPart = [coords[0]];
-    let accum = 0;
-    let target = segLen;
 
-    for (let i = 1; i < coords.length; i++) {
-      let p0 = coords[i - 1];
-      const p1 = coords[i];
-      let d = distanceMeters(p0[0], p0[1], p1[0], p1[1]);
-
-      while (accum + d >= target && parts.length < numSegments - 1) {
-        const remain = target - accum;
-        const ratio = d > 0 ? remain / d : 0;
-        const splitPt = [
-          p0[0] + (p1[0] - p0[0]) * ratio,
-          p0[1] + (p1[1] - p0[1]) * ratio
-        ];
-        currentPart.push(splitPt);
-        parts.push(currentPart);
-        currentPart = [splitPt];
-        p0 = splitPt;
-        d = distanceMeters(p0[0], p0[1], p1[0], p1[1]);
-        accum = 0;
-        target = segLen;
-      }
-
-      accum += d;
-      currentPart.push(p1);
-    }
-
-    parts.push(currentPart);
-    return parts;
-  }
-
-  // Liang-Barsky segment clipping against rectangular bounds { south, west, north, east }
-  function clipSegmentToBounds(p0, p1, b) {
-    const x0 = p0[1], y0 = p0[0];
-    const x1 = p1[1], y1 = p1[0];
-    const dx = x1 - x0;
-    const dy = y1 - y0;
-
-    let t0 = 0;
-    let t1 = 1;
-    const checks = [
-      [-dx, x0 - b.west],
-      [dx, b.east - x0],
-      [-dy, y0 - b.south],
-      [dy, b.north - y0]
-    ];
-
-    for (const [p, q] of checks) {
-      if (p === 0) {
-        if (q < 0) return null;
-      } else {
-        const r = q / p;
-        if (p < 0) {
-          if (r > t1) return null;
-          if (r > t0) t0 = r;
-        } else {
-          if (r < t0) return null;
-          if (r < t1) t1 = r;
-        }
-      }
-    }
-
-    return {
-      start: [y0 + t0 * dy, x0 + t0 * dx],
-      end: [y0 + t1 * dy, x0 + t1 * dx],
-      clippedStart: t0 > 1e-9,
-      clippedEnd: t1 < 1 - 1e-9
-    };
-  }
-
-  // Clip a polyline to bounds, returning 0+ continuous sub-polylines inside the box
-  function clipPolylineToBounds(coords, b) {
-    const pieces = [];
-    let current = null;
-
-    for (let i = 1; i < coords.length; i++) {
-      const seg = clipSegmentToBounds(coords[i - 1], coords[i], b);
-      if (!seg) {
-        if (current) {
-          pieces.push(current);
-          current = null;
-        }
-        continue;
-      }
-
-      if (!current) {
-        current = {
-          coords: [seg.start, seg.end],
-          startsAtOriginal: i === 1 && !seg.clippedStart,
-          endsAtOriginal: i === coords.length - 1 && !seg.clippedEnd
-        };
-      } else {
-        if (seg.clippedStart) {
-          // Re-entered box after leaving
-          pieces.push(current);
-          current = {
-            coords: [seg.start, seg.end],
-            startsAtOriginal: false,
-            endsAtOriginal: i === coords.length - 1 && !seg.clippedEnd
-          };
-        } else {
-          current.coords.push(seg.end);
-          current.endsAtOriginal = i === coords.length - 1 && !seg.clippedEnd;
-        }
-      }
-
-      if (seg.clippedEnd) {
-        pieces.push(current);
-        current = null;
-      }
-    }
-
-    if (current) pieces.push(current);
-    return pieces;
-  }
 
   async function geocodePlace(query, ctx = {}) {
     const { signal, allowNetwork = true } = ctx;
@@ -898,8 +890,10 @@ out skel qt;
   //     diameter <= 2r.
   //  3. Positions are centroids; clusters still closer than r to another one are moved
   //     to their leader, which guarantees a spacing of at least r between all points.
+  // linked(a, b) (optional): only junctions a road joins nearby may share a cluster (a
+  // member and its leader, and the leaders of two clusters merged in step 2).
   // Returns [{ lat, lon, members: [junction] }].
-  function clusterJunctions(jList, r) {
+  function clusterJunctions(jList, r, linked) {
     if (!(r > 0) || jList.length === 0) {
       return jList.map((j) => ({ lat: j.lat, lon: j.lon, members: [j] }));
     }
@@ -927,7 +921,7 @@ out skel qt;
       let bestD = Infinity;
       leaders.near(j.lat, j.lon, (e) => {
         const d = distanceMeters(j.lat, j.lon, e.lat, e.lon);
-        if (d <= r && d < bestD) {
+        if (d <= r && d < bestD && (!linked || linked(j.id, e.item.leader.id))) {
           best = e.item;
           bestD = d;
         }
@@ -973,6 +967,7 @@ out skel qt;
           const o = e.item;
           if (o === c || !o.alive || !c.alive) return;
           if (distanceMeters(c.lat, c.lon, o.lat, o.lon) > r) return;
+          if (linked && !linked(c.leader.id, o.leader.id)) return;
           if (!diameterOk(c, o)) return;
           const [keep, drop] = c.members.length >= o.members.length ? [c, o] : [o, c];
           keep.members = keep.members.concat(drop.members);
@@ -1012,523 +1007,2730 @@ out skel qt;
     return clusters.map((c) => ({ lat: c.lat, lon: c.lon, members: c.members }));
   }
 
-  function buildRoadGraph(elements, centerLat, centerLon, options) {
-    const {
-      targetNodes = 81,
-      mergeRadiusMeters = DEFAULT_MERGE_RADIUS_M,
-      includeDeadEnds = false,
-      subdivideLongRoads = false,
-      subdivideSpacingMeters = 80
-    } = options;
+  // ---------------------------------------------------------------------------
+  // Board generation. Outline (one board rectangle, every distance in metres):
+  //  1. Every way is clipped to the board rectangle first (points within CLAMP_TOL_M of the
+  //     outline count as on it). A road leaving the rectangle is used up to its last
+  //     junction (or real dead end) inside; the piece from there to the frame is left out,
+  //     and so is a road crossing without a junction inside. A way that leaves and comes back
+  //     gives separate stretches (no link through the outside). A junction that keeps only
+  //     one or two roads this way stays a point.
+  //  2. Roads are joined only where OpenStreetMap shares a node. Lines that cross without a
+  //     shared node (bridges, overpasses) both stay, without a point at the crossing.
+  //     Points are typed: junction, deadEnd (one road) and shape (a point that keeps a loop
+  //     or a second route).
+  //  3. Junctions closer than the merge radius r are merged (only junctions, and only if a
+  //     road joins them within 2 r).
+  //  4. Two roads running side by side (dual carriageways) are drawn as one centre line over
+  //     the stretch they run together; the roads before and after it keep their links.
+  //  5. Loops and second routes between the same two points keep a shape point.
+  //  6. Dead ends: kept, or (option) removed branch by branch. A junction left with one road
+  //     by the frame always stays.
+  //  7. Every connected part with 3+ points stays; a board split into many parts gets a
+  //     warning.
+  //  8. Merged points beside their road are moved onto it; lines are drawn simpler.
 
-    // 1. Parse raw nodes and ways
-    const rawNodes = new Map();
-    const ways = [];
-    for (const el of elements) {
-      if (el.type === 'node') {
-        rawNodes.set(el.id, { id: el.id, lat: el.lat, lon: el.lon });
-      } else if (el.type === 'way' && Array.isArray(el.nodes) && el.nodes.length >= 2) {
-        ways.push(el.nodes);
-      }
-    }
 
-    // 2. Build raw undirected adjacency (avoid duplicate segments)
-    const rawAdj = new Map();
-    const addRawEdge = (a, b) => {
-      if (a === b) return;
-      if (!rawNodes.has(a) || !rawNodes.has(b)) return;
-      if (!rawAdj.has(a)) rawAdj.set(a, new Set());
-      if (!rawAdj.has(b)) rawAdj.set(b, new Set());
-      rawAdj.get(a).add(b);
-      rawAdj.get(b).add(a);
-    };
-
-    for (const nodeIds of ways) {
-      for (let i = 1; i < nodeIds.length; i++) {
-        addRawEdge(nodeIds[i - 1], nodeIds[i]);
-      }
-    }
-
-    if (rawAdj.size === 0) {
-      return { nodes: new Map(), edges: [], stats: { nodeCount: 0, edgeCount: 0, avgDegree: 0, maxDegree: 0 } };
-    }
-
-    // 3. Contract degree-2 intermediate nodes while preserving road polyline geometry
-    const isJunction = (id) => {
-      const deg = rawAdj.get(id).size;
-      return deg !== 2;
-    };
-
-    const visitedDirected = new Set();
-    const contractedEdges = [];
-    const junctionIds = new Set();
-
-    for (const [id] of rawAdj) {
-      if (isJunction(id)) {
-        junctionIds.add(id);
-      }
-    }
-
-    for (const startId of junctionIds) {
-      for (const nextId of rawAdj.get(startId)) {
-        const dirKey = `${startId}->${nextId}`;
-        if (visitedDirected.has(dirKey)) continue;
-
-        const pathIds = [startId, nextId];
-        visitedDirected.add(dirKey);
-
-        let prev = startId;
-        let curr = nextId;
-        while (!junctionIds.has(curr)) {
-          const neighbors = Array.from(rawAdj.get(curr));
-          const nxt = neighbors[0] === prev ? neighbors[1] : neighbors[0];
-          if (nxt === undefined) break;
-          const stepKey = `${curr}->${nxt}`;
-          if (visitedDirected.has(stepKey)) break;
-          visitedDirected.add(stepKey);
-          pathIds.push(nxt);
-          prev = curr;
-          curr = nxt;
-          if (curr === startId) break;
-        }
-
-        // Mark reverse direction as visited too
-        const revKey = `${pathIds[pathIds.length - 1]}->${pathIds[pathIds.length - 2]}`;
-        visitedDirected.add(revKey);
-
-        const endId = pathIds[pathIds.length - 1];
-        if (startId === endId) continue;
-
-        const coords = pathIds.map((nid) => {
-          const n = rawNodes.get(nid);
-          return [n.lat, n.lon];
-        });
-
-        contractedEdges.push({
-          u: startId,
-          v: endId,
-          coords,
-          length: polylineLength(coords)
-        });
-      }
-    }
-
-    // 4. Merge nearby junctions (dual carriageways, offset crossings).
-    const jList = Array.from(junctionIds).map((id) => ({
-      id,
-      lat: rawNodes.get(id).lat,
-      lon: rawNodes.get(id).lon,
-      deg: rawAdj.get(id).size
-    }));
-    const clusters = clusterJunctions(jList, mergeRadiusMeters);
-    const clusterOfJunction = new Map();
-
-    let nextNodeId = 1;
-    let mergedNodes = new Map();
-    const memberPos = new Map(); // point id -> positions [lat, lon] of the junctions merged into it
-    for (const c of clusters) {
-      const nid = `n${nextNodeId++}`;
-      for (const m of c.members) clusterOfJunction.set(m.id, nid);
-      memberPos.set(nid, c.members.map((m) => [m.lat, m.lon]));
-      mergedNodes.set(nid, {
-        id: nid,
-        lat: c.lat,
-        lon: c.lon,
-        isMidpoint: false
-      });
-    }
-
-    // Remap edges, drop self-loops, deduplicate parallel edges (keep shortest)
-    const edgeMap = new Map();
-    for (const e of contractedEdges) {
-      const u = clusterOfJunction.get(e.u);
-      const v = clusterOfJunction.get(e.v);
-      if (!u || !v || u === v) continue;
-
-      const key = u < v ? `${u}|${v}` : `${v}|${u}`;
-      const coords = e.coords.slice();
-      // Where the road really ends (the junction before merging), kept per edge so the
-      // degree cap and the drawn shape can tell how far merging moved each end.
-      const rawU = coords[0];
-      const rawV = coords[coords.length - 1];
-      const nu = mergedNodes.get(u);
-      const nv = mergedNodes.get(v);
-      coords[0] = [nu.lat, nu.lon];
-      coords[coords.length - 1] = [nv.lat, nv.lon];
-
-      const orderedCoords = u < v ? coords : coords.reverse();
-      const len = polylineLength(orderedCoords);
-
-      const prev = edgeMap.get(key);
-      // the shortest road between the two points; an exact tie goes by its course, not by input order
-      if (!prev || len < prev.length - 1e-9 ||
-        (Math.abs(len - prev.length) <= 1e-9 && JSON.stringify(orderedCoords) < JSON.stringify(prev.coords))) {
-        const rawEnds = u < v ? [rawU, rawV] : [rawV, rawU];
-        edgeMap.set(key, {
-          u: u < v ? u : v,
-          v: u < v ? v : u,
-          coords: orderedCoords,
-          length: len,
-          rawEnds,
-          endShift: endShiftMeters(orderedCoords, rawEnds)
-        });
-      }
-    }
-
-    // Sorted by end points, so the board does not depend on the order of the input data
-    let currentEdges = Array.from(edgeMap.values()).sort((a, b) => (a.u < b.u ? -1 : a.u > b.u ? 1 : a.v < b.v ? -1 : a.v > b.v ? 1 : 0));
-
-    // 5. Optional: remove dead ends (degree 1) iteratively
-    if (!includeDeadEnds) {
-      let changed = true;
-      while (changed) {
-        changed = false;
-        const deg = new Map();
-        for (const e of currentEdges) {
-          deg.set(e.u, (deg.get(e.u) || 0) + 1);
-          deg.set(e.v, (deg.get(e.v) || 0) + 1);
-        }
-        const deadNodes = new Set();
-        for (const [id, d] of deg) {
-          if (d <= 1) deadNodes.add(id);
-        }
-        if (deadNodes.size > 0 && mergedNodes.size - deadNodes.size >= Math.min(12, targetNodes)) {
-          currentEdges = currentEdges.filter((e) => !deadNodes.has(e.u) && !deadNodes.has(e.v));
-          for (const id of deadNodes) mergedNodes.delete(id);
-          changed = true;
-        }
-      }
-    }
-
-    // 6. Optional: subdivide long roads at regular intervals.
-    //    A split point closer than the merge radius to an existing point (junction or an
-    //    earlier midpoint) is skipped; that piece of road then runs on to the next split.
-    if (subdivideLongRoads && subdivideSpacingMeters >= 20) {
-      const minGap = Math.max(mergeRadiusMeters, 1);
-      const pointGrid = makePointGrid(minGap, maxAbsLatOf(Array.from(mergedNodes.values())) + 0.5);
-      for (const n of mergedNodes.values()) pointGrid.add(n.lat, n.lon, n.id);
-      const tooClose = (lat, lon) => {
-        let close = false;
-        pointGrid.near(lat, lon, (e) => {
-          if (!close && distanceMeters(lat, lon, e.lat, e.lon) < minGap) close = true;
-        });
-        return close;
-      };
-
-      const subdividedEdges = [];
-      for (const e of currentEdges) {
-        if (e.length >= subdivideSpacingMeters * 1.35) {
-          const numSegments = Math.max(2, Math.round(e.length / subdivideSpacingMeters));
-          const subPolylines = splitPolyline(e.coords, numSegments);
-
-          let prevId = e.u;
-          let pending = null; // coords accumulated since the last accepted point
-          for (let i = 0; i < subPolylines.length; i++) {
-            const subCoords = pending ? pending.concat(subPolylines[i].slice(1)) : subPolylines[i];
-            const isLast = i === subPolylines.length - 1;
-            const endPt = subCoords[subCoords.length - 1];
-            if (!isLast && tooClose(endPt[0], endPt[1])) {
-              pending = subCoords;
-              continue;
-            }
-            let currId;
-            if (isLast) {
-              currId = e.v;
-            } else {
-              currId = `m${nextNodeId++}`;
-              mergedNodes.set(currId, {
-                id: currId,
-                lat: endPt[0],
-                lon: endPt[1],
-                isMidpoint: true
-              });
-              pointGrid.add(endPt[0], endPt[1], currId);
-            }
-            const rawEnds = [
-              prevId === e.u ? e.rawEnds[0] : subCoords[0],
-              currId === e.v ? e.rawEnds[1] : subCoords[subCoords.length - 1]
-            ];
-            subdividedEdges.push({
-              u: prevId,
-              v: currId,
-              coords: subCoords,
-              length: polylineLength(subCoords),
-              rawEnds,
-              endShift: endShiftMeters(subCoords, rawEnds)
-            });
-            prevId = currId;
-            pending = null;
-          }
-        } else {
-          subdividedEdges.push(e);
-        }
-      }
-      currentEdges = subdividedEdges;
-    }
-
-    // Build adjacency list for connected selection
-    const adj = new Map();
-    for (const id of mergedNodes.keys()) adj.set(id, new Set());
-    for (const e of currentEdges) {
-      adj.get(e.u).add(e.v);
-      adj.get(e.v).add(e.u);
-    }
-
-    // Remove isolated nodes
-    for (const [id, nbrs] of adj) {
-      if (nbrs.size === 0) {
-        mergedNodes.delete(id);
-        adj.delete(id);
-      }
-    }
-
-    if (mergedNodes.size === 0) {
-      return { nodes: new Map(), edges: [], stats: { nodeCount: 0, edgeCount: 0, avgDegree: 0, maxDegree: 0 } };
-    }
-
-    // 7. Determine the board area: the user-drawn rectangle `bounds` as it is, or a square
-    //    around the centre holding ~targetNodes junctions. The square reaches a little past
-    //    its outermost junction, so a street lying right on its edge is not cut in half: the
-    //    widest of SQUARE_MARGINS_M whose board has between options.minNodes and
-    //    options.maxNodes points (default 0.85 / 1.15 x targetNodes) is used, and a margin
-    //    never takes the square's corner past options.coverageM (the radius the road data is
-    //    known to cover).
-    const finishBoard = (boardBounds) => {
-      // 8. Collect nodes strictly inside `boardBounds` and edges whose both endpoints are inside
-      const inBox = new Set();
-      for (const [id, n] of mergedNodes) {
-        if (
-          n.lat >= boardBounds.south &&
-          n.lat <= boardBounds.north &&
-          n.lon >= boardBounds.west &&
-          n.lon <= boardBounds.east
-        ) {
-          inBox.add(id);
-        }
-      }
-
-      if (inBox.size === 0) {
-        return { nodes: new Map(), edges: [], boardBounds, stats: { nodeCount: 0, edgeCount: 0, avgDegree: 0, maxDegree: 0 } };
-      }
-
-      // Edges are used only if their whole drawn polyline stays inside the board rectangle
-      // (a road that leaves it on the way is not part of the board).
-      const EPS_DEG = 1e-9;
-      const edgeInside = (e) => {
-        if (!inBox.has(e.u) || !inBox.has(e.v)) return false;
-        for (const [la, lo] of e.coords) {
-          if (
-            la < boardBounds.south - EPS_DEG || la > boardBounds.north + EPS_DEG ||
-            lo < boardBounds.west - EPS_DEG || lo > boardBounds.east + EPS_DEG
-          ) return false;
-        }
-        return true;
-      };
-      const boxEdges = currentEdges.filter(edgeInside);
-
-      // Build subgraph adjacency inside the box
-      const subAdj = new Map();
-      for (const id of inBox) subAdj.set(id, new Set());
-      for (const e of boxEdges) {
-        subAdj.get(e.u).add(e.v);
-        subAdj.get(e.v).add(e.u);
-      }
-
-      // Compute 2-core (closed loops / enclosures) by iteratively pruning degree <= 1 dangling spurs
-      const coreNodes = new Set(inBox);
-      const coreAdj = new Map();
-      for (const [id, nbrs] of subAdj) coreAdj.set(id, new Set(nbrs));
-
-      let pruned = true;
-      while (pruned) {
-        pruned = false;
-        for (const id of Array.from(coreNodes)) {
-          if (coreAdj.get(id).size <= 1) {
-            for (const nb of coreAdj.get(id)) {
-              coreAdj.get(nb).delete(id);
-            }
-            coreAdj.delete(id);
-            coreNodes.delete(id);
-            pruned = true;
-          }
-        }
-      }
-
-      // Use the closed enclosure (2-core) only if its largest connected part is a playable
-      // board by itself; otherwise keep the spurs (all non-isolated points in the box).
-      let selected;
-      if (largestComponentSize(coreAdj) >= MIN_BOARD_NODES) {
-        selected = new Set(coreNodes);
-        // If user enabled "include dead ends", re-attach only true interior dead-ends (degree 1 in original street graph)
-        // that connect directly to the enclosure — never re-attach boundary-cut spurs.
-        if (includeDeadEnds) {
-          for (const id of inBox) {
-            if (selected.has(id)) continue;
-            if (adj.get(id).size === 1) {
-              const [onlyNb] = subAdj.get(id);
-              if (onlyNb && coreNodes.has(onlyNb)) {
-                selected.add(id);
-              }
-            }
-          }
-        }
-      } else {
-        selected = new Set();
-        for (const [id, nbrs] of subAdj) {
-          if (nbrs.size > 0) selected.add(id);
-        }
-        if (selected.size === 0) {
-          for (const id of inBox) selected.add(id);
-        }
-      }
-
-      // 9. Build final graph from selected nodes & edges
-      const finalNodes = new Map();
-      for (const id of selected) {
-        const n = mergedNodes.get(id);
-        finalNodes.set(id, {
-          id: n.id,
-          lat: n.lat,
-          lon: n.lon,
-          isMidpoint: n.isMidpoint,
-          neighbors: new Set()
-        });
-      }
-
-      const finalEdges = [];
-      for (const e of boxEdges) {
-        if (selected.has(e.u) && selected.has(e.v)) {
-          finalNodes.get(e.u).neighbors.add(e.v);
-          finalNodes.get(e.v).neighbors.add(e.u);
-          finalEdges.push(e);
-        }
-      }
-
-      // 10. Drop isolated points and keep only the largest connected component
-      const largest = pruneToLargestComponent(finalNodes, finalEdges);
-
-      // Far too many points: stop before the (heavier) simplification step
-      if (largest.nodes.size > EARLY_TOO_MANY_FACTOR * MAX_BOARD_NODES) {
-        throw new StreetGoError('too-many', `交点が多すぎます(${largest.nodes.size}点以上)。範囲を狭めてください`);
-      }
-
-      // 11. Draw each road with a simpler shape (see buildDisplayShapes), then keep the
-      //     connections simple: remove crossing edges, cap the degree at 4, prune dead
-      //     ends (if excluded) and keep the largest component again. Crossings are judged
-      //     on the drawn shapes. Shapes that had to stay unsimplified because of a road
-      //     removed meanwhile get a second try on the final board.
-      const shaped = buildDisplayShapes(largest.nodes, largest.edges, boardBounds);
-      let simple = simplifyBoardGraph(largest.nodes, shaped, { includeDeadEnds });
-      // 12. A merged point left just beside a straight road it belongs to (a thin sliver
-      //     between that road and the point) is moved onto the road, which is split there;
-      //     the degree cap then runs again if a point got more than 4 roads.
-      const aligned = alignPointsOntoRoads(simple.nodes, simple.edges, mergeRadiusMeters, memberPos, {
-        minDegree: ALIGN_GUARD_DEGREE && !includeDeadEnds ? 2 : 0
-      });
-      if (aligned.applied.length > 0) {
-        // Moving a point adds no crossing; a point may get more than MAX_NODE_DEGREE roads,
-        // or (when a road it shared with the moved point is merged into one) fewer, even
-        // one. Then the simplification runs again (degree cap, dead ends).
-        let again = false;
-        for (const n of aligned.nodes.values()) {
-          if (n.neighbors.size > MAX_NODE_DEGREE || (!includeDeadEnds && n.neighbors.size <= 1)) again = true;
-        }
-        if (again) {
-          const re = simplifyBoardGraph(aligned.nodes, aligned.edges, { includeDeadEnds });
-          simple = { ...re, info: { ...re.info, removedEdges: simple.info.removedEdges + re.info.removedEdges } };
-        } else {
-          simple = { nodes: aligned.nodes, edges: aligned.edges, info: simple.info };
-        }
-      }
-      // Final drawn shapes; this pass keeps the set of crossing pairs (checked here too)
-      let edgesOut = buildDisplayShapes(simple.nodes, simple.edges, boardBounds);
-      if (countEdgeCrossings(simple.nodes, edgesOut) > countEdgeCrossings(simple.nodes, simple.edges)) edgesOut = simple.edges;
-
-      return {
-        nodes: simple.nodes,
-        edges: edgesOut,
-        boardBounds,
-        stats: {
-          ...computeGraphStats(simple.nodes, edgesOut),
-          ...simple.info,
-          crossingsRemaining: countEdgeCrossings(simple.nodes, edgesOut),
-          alignedPoints: aligned.applied.length
-        }
-      };
-    };
-
-    if (options.bounds) {
-      const g = finishBoard(options.bounds);
-      g.stats.marginM = 0;
-      return g;
-    }
-
-    const cosCenterLat = Math.max(0.2, Math.cos((centerLat * Math.PI) / 180));
-    const chebyshevDists = [];
-    for (const n of mergedNodes.values()) {
-      const dLatM = Math.abs(n.lat - centerLat) * 111000;
-      const dLonM = Math.abs(n.lon - centerLon) * 111000 * cosCenterLat;
-      chebyshevDists.push(Math.max(dLatM, dLonM));
-    }
-    chebyshevDists.sort((a, b) => a - b);
-    const idx = Math.min(chebyshevDists.length - 1, Math.max(0, targetNodes - 1));
-    const squareAt = (halfSizeM) => {
-      const dLat = halfSizeM / 111000;
-      const dLon = halfSizeM / (111000 * cosCenterLat);
-      return {
-        south: centerLat - dLat,
-        north: centerLat + dLat,
-        west: centerLon - dLon,
-        east: centerLon + dLon
-      };
-    };
-    const maxNodes = Math.min(MAX_BOARD_NODES, Number.isFinite(options.maxNodes) ? options.maxNodes : SQUARE_MARGIN_MAX_RATIO * targetNodes);
-    const minNodes = Number.isFinite(options.minNodes) ? options.minNodes : SQUARE_MARGIN_MIN_RATIO * targetNodes;
-    const coverageM = Number.isFinite(options.coverageM) ? options.coverageM : Infinity;
-    // The widest margin whose board has between minNodes and maxNodes points; if none does,
-    // the plain square as before (SQUARE_MARGINS_M ends with the margin used before margins
-    // existed), so a short board is still enlarged the usual way.
-    const lastMargin = SQUARE_MARGINS_M[SQUARE_MARGINS_M.length - 1];
-    for (const marginM of SQUARE_MARGINS_M) {
-      const isLast = marginM === lastMargin;
-      const halfSizeM = chebyshevDists[idx] + marginM;
-      if (!isLast && halfSizeM * Math.SQRT2 > coverageM) continue;
-      let g;
-      try {
-        g = finishBoard(squareAt(halfSizeM));
-      } catch (err) {
-        if (!isLast && err && err.kind === 'too-many') continue;
-        throw err;
-      }
-      g.stats.marginM = marginM;
-      if (isLast || (g.nodes.size <= maxNodes && g.nodes.size >= minNodes)) return g;
-    }
-    return null; // not reached: the last margin always returns
+  function cmpKey(a, b) {
+    const na = typeof a === 'number';
+    const nb = typeof b === 'number';
+    if (na && nb) return a - b;
+    if (na !== nb) return na ? -1 : 1;
+    const sa = String(a);
+    const sb = String(b);
+    return sa < sb ? -1 : sa > sb ? 1 : 0;
   }
 
-  // Size of the largest connected component of an adjacency Map<id, Set<id>>
-  function largestComponentSize(adjMap) {
-    let best = 0;
-    const seen = new Set();
-    for (const id of adjMap.keys()) {
-      if (seen.has(id)) continue;
-      seen.add(id);
-      let size = 0;
-      const stack = [id];
-      while (stack.length) {
-        const cur = stack.pop();
-        size++;
-        for (const nb of adjMap.get(cur)) {
-          if (!seen.has(nb) && adjMap.has(nb)) {
-            seen.add(nb);
-            stack.push(nb);
+  function nowMs() {
+    return typeof performance !== 'undefined' && performance && typeof performance.now === 'function' ? performance.now() : Date.now();
+  }
+
+  // Parsed road data, cached per elements array (the square search builds many boards
+  // from the same data).
+  const prepCache = new WeakMap();
+  function prepareRoadData(elements) {
+    const list = Array.isArray(elements) ? elements : [];
+    if (prepCache.has(list)) return prepCache.get(list);
+    const nodes = new Map();
+    for (const el of list) {
+      if (el && el.type === 'node' && Number.isFinite(el.lat) && Number.isFinite(el.lon)) nodes.set(el.id, [el.lat, el.lon]);
+    }
+    const wayById = new Map();
+    for (const el of list) {
+      if (!el || el.type !== 'way' || !Array.isArray(el.nodes) || el.nodes.length < 2) continue;
+      const sig = el.nodes.join(',');
+      const id = el.id !== undefined && el.id !== null ? el.id : `w:${sig}`;
+      const prev = wayById.get(id);
+      if (!prev || sig < prev.sig) wayById.set(id, { id, nodes: el.nodes, sig });
+    }
+    const ways = [];
+    const nbrs = new Map();
+    const link = (a, b) => {
+      if (!nbrs.has(a)) nbrs.set(a, new Set());
+      if (!nbrs.has(b)) nbrs.set(b, new Set());
+      nbrs.get(a).add(b);
+      nbrs.get(b).add(a);
+    };
+    const sorted = Array.from(wayById.values()).sort((a, b) => cmpKey(a.id, b.id));
+    // Closed ways that look like the outline of an area (a square, a plaza) rather than a road:
+    // not joined to any other way, or with AREA_SHARP_CORNERS corners of 60 degrees or more
+    // (roundabouts and loop roads bend smoothly). Used only with options.dropAreaOutlines.
+    const wayCount = new Map();
+    for (const w of sorted) for (const nid of new Set(w.nodes)) wayCount.set(nid, (wayCount.get(nid) || 0) + 1);
+    for (const w of sorted) w.areaLike = isAreaOutline(w.nodes, nodes, wayCount);
+    for (const w of sorted) {
+      // A way referring to a node that is not in the data is split there (the response check
+      // refuses such data before it gets here).
+      let run = [];
+      const flush = () => {
+        if (run.length >= 2) {
+          let minLat = Infinity;
+          let maxLat = -Infinity;
+          let minLon = Infinity;
+          let maxLon = -Infinity;
+          for (const nid of run) {
+            const [la, lo] = nodes.get(nid);
+            if (la < minLat) minLat = la;
+            if (la > maxLat) maxLat = la;
+            if (lo < minLon) minLon = lo;
+            if (lo > maxLon) maxLon = lo;
           }
+          ways.push({ id: w.id, nodes: run, minLat, maxLat, minLon, maxLon, areaLike: w.areaLike });
+          for (let i = 1; i < run.length; i++) link(run[i - 1], run[i]);
+        }
+        run = [];
+      };
+      for (const nid of w.nodes) {
+        if (!nodes.has(nid)) {
+          flush();
+          continue;
+        }
+        if (run.length > 0 && run[run.length - 1] === nid) continue;
+        run.push(nid);
+      }
+      flush();
+    }
+    const rawDeg = new Map();
+    const junctionIds = [];
+    for (const [id, s] of nbrs) {
+      rawDeg.set(id, s.size);
+      if (s.size >= 3) junctionIds.push(id);
+    }
+    junctionIds.sort(cmpKey);
+    const prep = { nodes, ways, rawDeg, junctionIds };
+    prepCache.set(list, prep);
+    return prep;
+  }
+
+  function isAreaOutline(ids, nodes, wayCount) {
+    if (ids.length < 4 || ids[0] !== ids[ids.length - 1] || !ids.every((id) => nodes.has(id))) return false;
+    if (ids.every((id) => wayCount.get(id) === 1)) return true;
+    const lat0 = nodes.get(ids[0])[0];
+    const kx = 111320 * Math.max(1e-6, Math.cos((lat0 * Math.PI) / 180));
+    const p = ids.map((id) => [nodes.get(id)[1] * kx, nodes.get(id)[0] * 110540]);
+    const m = p.length - 1;
+    let sharp = 0;
+    for (let i = 0; i < m; i++) {
+      const a = p[(i - 1 + m) % m];
+      const b = p[i];
+      const c = p[(i + 1) % m];
+      const v1 = [b[0] - a[0], b[1] - a[1]];
+      const v2 = [c[0] - b[0], c[1] - b[1]];
+      const l1 = Math.hypot(v1[0], v1[1]);
+      const l2 = Math.hypot(v2[0], v2[1]);
+      if (l1 < 0.5 || l2 < 0.5) continue;
+      if ((v1[0] * v2[0] + v1[1] * v2[1]) / (l1 * l2) <= 0.5) sharp++;
+    }
+    return sharp >= AREA_SHARP_CORNERS;
+  }
+
+  // Local metres around the middle of the rectangle (x east, y north) and back.
+  function makeFrame(rect) {
+    const lat0 = (rect.south + rect.north) / 2;
+    const lon0 = (rect.west + rect.east) / 2;
+    const kx = 111320 * Math.max(1e-6, Math.cos((lat0 * Math.PI) / 180));
+    const ky = 110540;
+    const F = {
+      rect,
+      kx,
+      ky,
+      x0: (rect.west - lon0) * kx,
+      x1: (rect.east - lon0) * kx,
+      y0: (rect.south - lat0) * ky,
+      y1: (rect.north - lat0) * ky
+    };
+    F.xy = (lat, lon) => [(lon - lon0) * kx, (lat - lat0) * ky];
+    // Back to latitude / longitude, kept inside the rectangle (rounding only)
+    F.ll = (p) => [
+      Math.min(rect.north, Math.max(rect.south, lat0 + p[1] / ky)),
+      Math.min(rect.east, Math.max(rect.west, lon0 + p[0] / kx))
+    ];
+    const E = 1e-6;
+    F.onFrame = (p) => Math.abs(p[0] - F.x0) < E || Math.abs(p[0] - F.x1) < E || Math.abs(p[1] - F.y0) < E || Math.abs(p[1] - F.y1) < E;
+    F.snap = (p) => {
+      let [x, y] = p;
+      if (Math.abs(x - F.x0) < 1e-7) x = F.x0;
+      if (Math.abs(x - F.x1) < 1e-7) x = F.x1;
+      if (Math.abs(y - F.y0) < 1e-7) y = F.y0;
+      if (Math.abs(y - F.y1) < 1e-7) y = F.y1;
+      return [Math.min(F.x1, Math.max(F.x0, x)), Math.min(F.y1, Math.max(F.y0, y))];
+    };
+    return F;
+  }
+
+  // Liang-Barsky: [t0, t1] of segment p-q inside the rectangle, or null
+  function clipParams(p, q, F) {
+    const dx = q[0] - p[0];
+    const dy = q[1] - p[1];
+    let t0 = 0;
+    let t1 = 1;
+    const checks = [[-dx, p[0] - F.x0], [dx, F.x1 - p[0]], [-dy, p[1] - F.y0], [dy, F.y1 - p[1]]];
+    for (const [pp, qq] of checks) {
+      if (pp === 0) {
+        if (qq < 0) return null;
+      } else {
+        const r = qq / pp;
+        if (pp < 0) {
+          if (r > t1) return null;
+          if (r > t0) t0 = r;
+        } else {
+          if (r < t0) return null;
+          if (r < t1) t1 = r;
         }
       }
-      if (size > best) best = size;
+    }
+    return [t0, t1];
+  }
+
+  // --- polyline helpers (metres) ---
+  function lenXY(pts) {
+    let t = 0;
+    for (let i = 1; i < pts.length; i++) t += Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]);
+    return t;
+  }
+  function cumXY(pts) {
+    const c = [0];
+    for (let i = 1; i < pts.length; i++) c.push(c[i - 1] + Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]));
+    return c;
+  }
+  function atXY(pts, cum, s) {
+    if (s <= 0) return pts[0].slice();
+    const L = cum[cum.length - 1];
+    if (s >= L) return pts[pts.length - 1].slice();
+    let lo = 1;
+    let hi = cum.length - 1;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (cum[mid] < s) lo = mid + 1;
+      else hi = mid;
+    }
+    const seg = cum[lo] - cum[lo - 1];
+    const t = seg > 0 ? (s - cum[lo - 1]) / seg : 0;
+    return [pts[lo - 1][0] + (pts[lo][0] - pts[lo - 1][0]) * t, pts[lo - 1][1] + (pts[lo][1] - pts[lo - 1][1]) * t];
+  }
+  function dirAtXY(pts, cum, s) {
+    let i = 1;
+    while (i < cum.length - 1 && cum[i] < s) i++;
+    const dx = pts[i][0] - pts[i - 1][0];
+    const dy = pts[i][1] - pts[i - 1][1];
+    const l = Math.hypot(dx, dy) || 1;
+    return [dx / l, dy / l];
+  }
+  // pts between arc lengths s0 < s1
+  function subXY(pts, cum, s0, s1) {
+    const out = [atXY(pts, cum, s0)];
+    for (let i = 1; i < pts.length - 1; i++) if (cum[i] > s0 && cum[i] < s1) out.push(pts[i].slice());
+    out.push(atXY(pts, cum, s1));
+    return out;
+  }
+  // nearest point of polyline pts to p: { d, s, dir }
+  function nearestXY(pts, cum, p) {
+    let best = { d: Infinity, s: 0, dir: [1, 0] };
+    for (let i = 1; i < pts.length; i++) {
+      const a = pts[i - 1];
+      const b = pts[i];
+      const abx = b[0] - a[0];
+      const aby = b[1] - a[1];
+      const l2 = abx * abx + aby * aby;
+      const t = l2 > 0 ? Math.max(0, Math.min(1, ((p[0] - a[0]) * abx + (p[1] - a[1]) * aby) / l2)) : 0;
+      const d = Math.hypot(p[0] - a[0] - abx * t, p[1] - a[1] - aby * t);
+      if (d < best.d) {
+        const l = Math.sqrt(l2) || 1;
+        best = { d, s: cum[i - 1] + (cum[i] - cum[i - 1]) * t, dir: [abx / l, aby / l] };
+      }
     }
     return best;
   }
+  // nearestXY restricted to the arc lengths lo..hi of pts
+  function nearestXYRange(pts, cum, p, lo, hi) {
+    let best = { d: Infinity, s: Math.max(0, lo), dir: [1, 0] };
+    for (let i = 1; i < pts.length; i++) {
+      if (cum[i] < lo || cum[i - 1] > hi) continue;
+      const a = pts[i - 1];
+      const b = pts[i];
+      const abx = b[0] - a[0];
+      const aby = b[1] - a[1];
+      const l2 = abx * abx + aby * aby;
+      const segLen = Math.sqrt(l2) || 1;
+      let t = l2 > 0 ? ((p[0] - a[0]) * abx + (p[1] - a[1]) * aby) / l2 : 0;
+      const tLo = Math.max(0, (lo - cum[i - 1]) / segLen);
+      const tHi = Math.min(1, (hi - cum[i - 1]) / segLen);
+      t = Math.max(tLo, Math.min(tHi, t));
+      const d = Math.hypot(p[0] - a[0] - abx * t, p[1] - a[1] - aby * t);
+      if (d < best.d) best = { d, s: cum[i - 1] + (cum[i] - cum[i - 1]) * t, dir: [abx / segLen, aby / segLen] };
+    }
+    return best;
+  }
+  function simplifyXY(pts, tol) {
+    if (pts.length <= 2) return pts;
+    const idx = douglasPeuckerIdx(pts, pts.map((_, i) => i), tol);
+    return idx.map((i) => pts[i]);
+  }
+  // Largest distance of polyline a (sampled every 2 m) from polyline b, not counting a's ends
+  function maxDeviationXY(a, b) {
+    const ca = cumXY(a);
+    const cb = cumXY(b);
+    const L = ca[ca.length - 1];
+    const n = Math.max(2, Math.ceil(L / 2));
+    let m = 0;
+    for (let k = 1; k < n; k++) m = Math.max(m, nearestXY(b, cb, atXY(a, ca, (k * L) / n)).d);
+    return m;
+  }
+  function segSegDistXY(a0, a1, b0, b1) {
+    if (segmentMeetPoints(a0, a1, b0, b1).length > 0) return 0;
+    return Math.min(pointSegDistXY(a0, b0, b1), pointSegDistXY(a1, b0, b1), pointSegDistXY(b0, a0, a1), pointSegDistXY(b1, a0, a1));
+  }
+  // Largest distance of the samples of a from polyline b (both ways)
+  function hausdorffXY(a, b, step = 3) {
+    const one = (p, q) => {
+      const cq = cumXY(q);
+      const cp = cumXY(p);
+      const L = cp[cp.length - 1];
+      const n = Math.max(1, Math.ceil(L / step));
+      let m = 0;
+      for (let k = 0; k <= n; k++) m = Math.max(m, nearestXY(q, cq, atXY(p, cp, (k * L) / n)).d);
+      return m;
+    };
+    return Math.max(one(a, b), one(b, a));
+  }
+  // Two polylines of the same direction averaged point by point (equal fractions of length)
+  function averageXY(a, b) {
+    const ca = cumXY(a);
+    const cb = cumXY(b);
+    const La = ca[ca.length - 1];
+    const Lb = cb[cb.length - 1];
+    const n = Math.max(2, Math.ceil(Math.max(La, Lb) / 4) + 1);
+    const out = [];
+    for (let k = 0; k < n; k++) {
+      const t = k / (n - 1);
+      const p = atXY(a, ca, t * La);
+      const q = atXY(b, cb, t * Lb);
+      out.push([(p[0] + q[0]) / 2, (p[1] + q[1]) / 2]);
+    }
+    return out;
+  }
+
+  // Shortest road distance between junctions, searched up to `limit` metres
+  function makeRoadLink(jAdj, limit) {
+    const memo = new Map();
+    const from = (src) => {
+      if (memo.has(src)) return memo.get(src);
+      const dist = new Map([[src, 0]]);
+      const done = new Set();
+      const queue = [[0, src]];
+      while (queue.length > 0) {
+        let bi = 0;
+        for (let i = 1; i < queue.length; i++) if (queue[i][0] < queue[bi][0]) bi = i;
+        const [d, cur] = queue[bi];
+        queue[bi] = queue[queue.length - 1];
+        queue.pop();
+        if (done.has(cur)) continue;
+        done.add(cur);
+        const out = jAdj.get(cur);
+        if (!out) continue;
+        for (const [nb, len] of out) {
+          const nd = d + len;
+          if (nd > limit) continue;
+          if (!dist.has(nb) || nd < dist.get(nb)) {
+            dist.set(nb, nd);
+            queue.push([nd, nb]);
+          }
+        }
+      }
+      memo.set(src, dist);
+      return dist;
+    };
+    return (a, b) => a === b || from(a).has(b);
+  }
+
+  // Working graph: points (metres) and roads (polylines), with incidence lists.
+  function makeWorkGraph() {
+    const G = {
+      points: new Map(), // pid -> { pid, p: [x, y], shape, mid, real, pin, stub, members: [[x, y]] | null }
+      edges: new Map(), // eid -> { eid, u, v, pts, ways: Set, src, rawA, rawB }
+      inc: new Map(), // pid -> Set(eid)
+      alias: new Map(), // merged pid -> pid it went into
+      tails: [], // { pid, pts } drawn from point pid (short dead-end branches), not on the board
+      streetWays: [], // way ids of roads merged as one street (side by side)
+      nextP: 0,
+      nextE: 0
+    };
+    G.addPoint = (p, props = {}) => {
+      const pid = `p${++G.nextP}`;
+      G.points.set(pid, { pid, p: p.slice(), shape: false, mid: false, members: null, ...props });
+      G.inc.set(pid, new Set());
+      return pid;
+    };
+    G.resolve = (pid) => {
+      while (G.alias.has(pid)) pid = G.alias.get(pid);
+      return pid;
+    };
+    G.addEdge = (u, v, pts, ways, src, rawA, rawB) => {
+      if (pts.length < 2) return null;
+      const out = pts.map((q) => q.slice());
+      out[0] = G.points.get(u).p.slice();
+      out[out.length - 1] = G.points.get(v).p.slice();
+      const eid = ++G.nextE;
+      G.edges.set(eid, {
+        eid,
+        u,
+        v,
+        pts: out,
+        ways: new Set(ways),
+        src: Number.isFinite(src) ? src : lenXY(out),
+        rawA: rawA ? rawA.slice() : out[0].slice(),
+        rawB: rawB ? rawB.slice() : out[out.length - 1].slice()
+      });
+      G.inc.get(u).add(eid);
+      G.inc.get(v).add(eid);
+      return eid;
+    };
+    G.removeEdge = (eid) => {
+      const e = G.edges.get(eid);
+      if (!e) return null;
+      G.edges.delete(eid);
+      if (G.inc.has(e.u)) G.inc.get(e.u).delete(eid);
+      if (G.inc.has(e.v)) G.inc.get(e.v).delete(eid);
+      return e;
+    };
+    G.removePoint = (pid) => {
+      for (const eid of Array.from(G.inc.get(pid) || [])) G.removeEdge(eid);
+      G.points.delete(pid);
+      G.inc.delete(pid);
+    };
+    G.degree = (pid) => (G.inc.get(pid) ? G.inc.get(pid).size : 0);
+    // Move point pid to p; its roads keep their course with the end moved
+    G.movePoint = (pid, p) => {
+      G.points.get(pid).p = p.slice();
+      for (const eid of G.inc.get(pid)) {
+        const e = G.edges.get(eid);
+        if (e.u === pid) e.pts[0] = p.slice();
+        if (e.v === pid) e.pts[e.pts.length - 1] = p.slice();
+      }
+    };
+    // Merge points a and b into a new point at p
+    G.mergePoints = (a, b, p) => {
+      a = G.resolve(a);
+      b = G.resolve(b);
+      if (a === b) return a;
+      const pa = G.points.get(a);
+      const pb = G.points.get(b);
+      const members = (pa.members || [pa.p]).concat(pb.members || [pb.p]);
+      const r = G.addPoint(p, { members, real: pa.real || pb.real, pin: pa.pin || pb.pin });
+      for (const old of [a, b]) {
+        for (const eid of Array.from(G.inc.get(old))) {
+          const e = G.edges.get(eid);
+          if (e.u === old) e.u = r;
+          if (e.v === old) e.v = r;
+          G.inc.get(r).add(eid);
+        }
+        G.inc.get(old).clear();
+        G.points.delete(old);
+        G.inc.delete(old);
+        G.alias.set(old, r);
+      }
+      G.movePoint(r, p);
+      return r;
+    };
+    // Split edge e at the arc lengths `at` (ascending, strictly inside); returns the new pids
+    G.splitEdge = (eid, at, props) => {
+      const e = G.edges.get(eid);
+      const cum = cumXY(e.pts);
+      const L = cum[cum.length - 1];
+      const pids = at.map((s) => G.addPoint(atXY(e.pts, cum, s), props));
+      G.removeEdge(eid);
+      const cuts = [0].concat(at, [L]);
+      const ends = [e.u].concat(pids, [e.v]);
+      for (let k = 1; k < cuts.length; k++) {
+        const piece = subXY(e.pts, cum, cuts[k - 1], cuts[k]);
+        const frac = L > 0 ? (cuts[k] - cuts[k - 1]) / L : 0;
+        G.addEdge(ends[k - 1], ends[k], piece, e.ways, e.src * frac,
+          k === 1 ? e.rawA : piece[0], k === cuts.length - 1 ? e.rawB : piece[piece.length - 1]);
+      }
+      return pids;
+    };
+    return G;
+  }
+
+  function newCoverage() {
+    return { totalM: 0, keptM: 0, mergedM: 0, tailM: 0, areaM: 0, leavingM: 0, droppedM: { deadEnd: 0, smallComponent: 0, smallLoop: 0, outsideRing: 0 } };
+  }
+
+  // Edges whose segments run within PARALLEL_WITHIN_M of each other in nearly the same
+  // direction over some length (grid of segments; the exact test follows).
+  function* parallelCandidates(G) {
+    const CELL = 25;
+    const half = PARALLEL_WITHIN_M / 2;
+    const cells = new Map();
+    const segs = [];
+    for (const e of G.edges.values()) {
+      if (e.u === e.v) continue;
+      for (let i = 1; i < e.pts.length; i++) {
+        const a = e.pts[i - 1];
+        const b = e.pts[i];
+        const len = Math.hypot(b[0] - a[0], b[1] - a[1]);
+        if (len < 1e-6) continue;
+        const sidx = segs.length;
+        segs.push({ eid: e.eid, a, b, len, dx: (b[0] - a[0]) / len, dy: (b[1] - a[1]) / len });
+        const x0 = Math.floor((Math.min(a[0], b[0]) - half) / CELL);
+        const x1 = Math.floor((Math.max(a[0], b[0]) + half) / CELL);
+        const y0 = Math.floor((Math.min(a[1], b[1]) - half) / CELL);
+        const y1 = Math.floor((Math.max(a[1], b[1]) + half) / CELL);
+        for (let cx = x0; cx <= x1; cx++) {
+          for (let cy = y0; cy <= y1; cy++) {
+            const k = `${cx},${cy}`;
+            if (!cells.has(k)) cells.set(k, []);
+            cells.get(k).push(sidx);
+          }
+        }
+      }
+    }
+    const seenSeg = new Set();
+    const score = new Map();
+    let checks = 0;
+    for (const list of cells.values()) {
+      yield;
+      for (let i = 0; i < list.length; i++) {
+        const si = segs[list[i]];
+        for (let j = i + 1; j < list.length; j++) {
+          const sj = segs[list[j]];
+          if (si.eid === sj.eid) continue;
+          if (Math.abs(si.dx * sj.dx + si.dy * sj.dy) < PARALLEL_COS) continue;
+          const sk = list[i] < list[j] ? `${list[i]}/${list[j]}` : `${list[j]}/${list[i]}`;
+          if (seenSeg.has(sk)) continue;
+          seenSeg.add(sk);
+          if (++checks > PARALLEL_MAX_PAIRS * 20) throw new StreetGoError('too-many', '道路が多すぎます。範囲を狭めてください');
+          if (segSegDistXY(si.a, si.b, sj.a, sj.b) >= PARALLEL_WITHIN_M) continue;
+          const [ea, eb] = si.eid < sj.eid ? [si.eid, sj.eid] : [sj.eid, si.eid];
+          const pk = `${ea}|${eb}`;
+          score.set(pk, (score.get(pk) || 0) + Math.min(si.len, sj.len));
+        }
+      }
+    }
+    const pairs = [];
+    for (const [pk, s] of score) {
+      if (s < COINCIDENT_MIN_RUN_M) continue;
+      const [a, b] = pk.split('|').map(Number);
+      pairs.push([a, b]);
+    }
+    if (pairs.length > PARALLEL_MAX_PAIRS) throw new StreetGoError('too-many', '道路が多すぎます。範囲を狭めてください');
+    pairs.sort((x, y) => x[0] - y[0] || x[1] - y[1]);
+    return pairs;
+  }
+
+  // The longest stretch over which edges A and B run together, or null.
+  // Returns arc lengths on both: { S, O, s0, s1, o0, o1 } (S is the shorter edge).
+  function findParallelRun(G, A, B) {
+    const [S, O] = lenXY(A.pts) <= lenXY(B.pts) ? [A, B] : [B, A];
+    const cs = cumXY(S.pts);
+    const cO = cumXY(O.pts);
+    const Ls = cs[cs.length - 1];
+    if (Ls < COINCIDENT_MIN_RUN_M) return null;
+    const shared = [];
+    for (const x of [S.u, S.v]) if (x === O.u || x === O.v) shared.push(G.points.get(x).p);
+    const n = Math.max(1, Math.ceil(Ls / 2));
+    const step = Ls / n;
+    const close = new Array(n);
+    const counts = new Array(n);
+    const same = new Array(n);
+    const oAt = new Array(n);
+    // The matching place on O is followed along the run (it moves at most a few metres per
+    // sample), so a run never jumps to another part of O that passes nearby (a U-turn).
+    const window = 2 * step + 3;
+    let oPrev = null;
+    let misses = 0;
+    for (let k = 0; k < n; k++) {
+      const s = (k + 0.5) * step;
+      const p = atXY(S.pts, cs, s);
+      const near = oPrev === null ? nearestXY(O.pts, cO, p) : nearestXYRange(O.pts, cO, p, oPrev - window, oPrev + window);
+      const dir = dirAtXY(S.pts, cs, s);
+      close[k] = near.d < PARALLEL_WITHIN_M && Math.abs(dir[0] * near.dir[0] + dir[1] * near.dir[1]) >= PARALLEL_COS;
+      same[k] = close[k] && near.d < COINCIDENT_M;
+      counts[k] = close[k] && !shared.some((q) => Math.hypot(p[0] - q[0], p[1] - q[1]) < PARALLEL_SHARED_M);
+      oAt[k] = near.s;
+      if (close[k]) {
+        oPrev = near.s;
+        misses = 0;
+      } else if (oPrev !== null && ++misses > 1) {
+        oPrev = null;
+      }
+    }
+    let best = null;
+    let k = 0;
+    while (k < n) {
+      if (!close[k]) {
+        k++;
+        continue;
+      }
+      let end = k;
+      let eff = 0;
+      let co = 0;
+      let j = k;
+      while (j < n) {
+        if (close[j]) {
+          end = j;
+          if (counts[j]) eff += step;
+          if (same[j]) co += step;
+          j++;
+        } else if (j + 1 < n && close[j + 1]) {
+          j++; // a single sample apart: same run
+        } else break;
+      }
+      const s0 = k * step;
+      const s1 = (end + 1) * step;
+      const score = Math.max(eff, co >= COINCIDENT_MIN_RUN_M ? co : 0);
+      if ((eff >= PARALLEL_MIN_RUN_M || co >= COINCIDENT_MIN_RUN_M) && (!best || score > best.eff)) {
+        // ends of the run on O: the followed places, half a sample further out
+        const sgn = oAt[end] >= oAt[k] ? 1 : -1;
+        const LO = cO[cO.length - 1];
+        const o0 = Math.max(0, Math.min(LO, oAt[k] - (sgn * step) / 2));
+        const o1 = Math.max(0, Math.min(LO, oAt[end] + (sgn * step) / 2));
+        const need = eff >= PARALLEL_MIN_RUN_M ? PARALLEL_MIN_RUN_M * 0.5 : COINCIDENT_MIN_RUN_M * 0.8;
+        if (Math.abs(o1 - o0) >= need) best = { S, O, s0, s1, o0, o1, eff: score, coincidentOnly: eff < PARALLEL_MIN_RUN_M };
+      }
+      k = end + 1;
+    }
+    return best;
+  }
+
+  // Replace the stretch where two roads run together with one centre line. The ends of the
+  // stretch become one point each (an existing end point, or a new point where the roads
+  // part); the parts before and after keep their own course and links.
+  function applyParallelRun(G, run, F, cov, r) {
+    const snap = Math.max(PARALLEL_END_SNAP_M, r || 0);
+    let A = run.S;
+    let B = run.O;
+    let a0 = run.s0;
+    let a1 = run.s1;
+    let b0 = run.o0;
+    let b1 = run.o1;
+    const LA = lenXY(A.pts);
+    const LB = lenXY(B.pts);
+    let bView = { u: B.u, v: B.v, pts: B.pts, rawA: B.rawA, rawB: B.rawB };
+    if (b0 > b1) {
+      bView = { u: B.v, v: B.u, pts: B.pts.slice().reverse(), rawA: B.rawB, rawB: B.rawA };
+      b0 = LB - b0;
+      b1 = LB - b1;
+    }
+    // where the two roads start / stop running together (before snapping to an end point)
+    const runAt = [[a0, b0], [a1, b1]];
+    if (a0 <= snap) a0 = 0;
+    if (LA - a1 <= snap) a1 = LA;
+    if (b0 <= snap) b0 = 0;
+    if (LB - b1 <= snap) b1 = LB;
+    if (a1 - a0 < 1 || b1 - b0 < 1) return false;
+    // Two lines on top of each other from a shared point (the roads of one merged junction
+    // reaching it along the same short road inside it) are left as they are: a new point where
+    // they part would undo the merge.
+    if (run.coincidentOnly && (a0 === 0 || a1 === LA) && (b0 === 0 || b1 === LB)) {
+      const sharedEnd = (a0 === 0 && b0 === 0 && A.u === bView.u) || (a1 === LA && b1 === LB && A.v === bView.v);
+      const otherEndApart = !(a0 === 0 && b0 === 0 && a1 === LA && b1 === LB);
+      if (sharedEnd && otherEndApart) return false;
+    }
+    const ca = cumXY(A.pts);
+    const cb = cumXY(bView.pts);
+    // Which of the two roads the merged line follows (the same side all along a street): the
+    // road whose end points stay (an end point of only one road at a stretch end), else the
+    // one already merged before (more ways), else the longer one.
+    let votesA = 0;
+    let votesB = 0;
+    for (const side of [0, 1]) {
+      const aNode = side === 0 ? a0 === 0 : a1 === LA;
+      const bNode = side === 0 ? b0 === 0 : b1 === LB;
+      if (aNode && !bNode) votesA++;
+      if (bNode && !aNode) votesB++;
+    }
+    // (last: the shorter one, which has no detour to a merged point)
+    const keepA = votesA !== votesB ? votesA > votesB : A.ways.size !== B.ways.size ? A.ways.size > B.ways.size : LA <= LB;
+    if (G.streetWays) G.streetWays.push(new Set([...A.ways, ...B.ways]));
+    // Two end points that become one keep the place of one of them (a real junction, not a
+    // point between): the one with more roads, then the kept road's
+    const keepOneOf = (x, y) => {
+      const px = G.points.get(x);
+      const py = G.points.get(y);
+      const dx = G.degree(x);
+      const dy = G.degree(y);
+      if (dx !== dy) return (dx > dy ? px : py).p.slice();
+      return (keepA ? px : py).p.slice();
+    };
+    // Moving a point takes the ends of its other roads along: a move that would take one of
+    // them more than MOVE_MAX_DEV_M off its course is not made (two end points that would
+    // have to merge: the stretch is left as it is; one end point: it stays where it is)
+    const otherRoadsOk = (pid, q) => {
+      for (const eid of G.inc.get(pid)) {
+        if (eid === A.eid || eid === B.eid) continue;
+        const e = G.edges.get(eid);
+        if (e.u === e.v) continue;
+        const replaced = e.pts.slice();
+        replaced[e.u === pid ? 0 : replaced.length - 1] = q;
+        // measured from the roads themselves (the input data), so a line moved along its street
+        // (over a short road merged into the point) is fine
+        if (G.offRoad && G.maxOffRoad(replaced) > MOVE_MAX_DEV_M) return false;
+      }
+      return true;
+    };
+    // The same check for the pieces before / after the stretch, which end at the new point
+    const pieceOk = (pts, atEnd, q) => {
+      if (!G.maxOffRoad) return true;
+      const out = pts.slice();
+      out[atEnd ? out.length - 1 : 0] = q;
+      return G.maxOffRoad(out) <= MOVE_MAX_DEV_M;
+    };
+    for (const side of [0, 1]) {
+      const aAt = side === 0 ? a0 : a1;
+      const bAt = side === 0 ? b0 : b1;
+      const aNode = side === 0 ? aAt === 0 : aAt === LA;
+      const bNode = side === 0 ? bAt === 0 : bAt === LB;
+      const aPart = aNode ? null : side === 0 ? subXY(A.pts, ca, 0, aAt) : subXY(A.pts, ca, aAt, LA);
+      const bPart = bNode ? null : side === 0 ? subXY(bView.pts, cb, 0, bAt) : subXY(bView.pts, cb, bAt, LB);
+      const atEnd = side === 0; // the piece before the stretch ends at the new point
+      if (aNode && bNode) {
+        const x = G.resolve(side === 0 ? A.u : A.v);
+        const y = G.resolve(side === 0 ? bView.u : bView.v);
+        if (x === y) continue;
+        const q = keepOneOf(x, y);
+        if (!otherRoadsOk(x, q) || !otherRoadsOk(y, q)) return false;
+      } else if (aNode || bNode) {
+        // the passing road's piece goes to the end point (where it is, or on the centre line)
+        const P = G.points.get(G.resolve(aNode ? (side === 0 ? A.u : A.v) : (side === 0 ? bView.u : bView.v)));
+        const part = aNode ? bPart : aPart;
+        const [ra, rb] = runAt[side];
+        const pa0 = atXY(A.pts, ca, ra);
+        const pb0 = atXY(bView.pts, cb, rb);
+        let q = [(pa0[0] + pb0[0]) / 2, (pa0[1] + pb0[1]) / 2];
+        if (P.real || !otherRoadsOk(P.pid, q)) q = P.p;
+        if (!pieceOk(part, atEnd, q)) return false;
+      } else {
+        const pa = atXY(A.pts, ca, aAt);
+        const pb = atXY(bView.pts, cb, bAt);
+        const q = [(pa[0] + pb[0]) / 2, (pa[1] + pb[1]) / 2];
+        if (Math.hypot(pa[0] - pb[0], pa[1] - pb[1]) > 1.5 * PARALLEL_WITHIN_M) return false;
+        if (!pieceOk(aPart, atEnd, q) || !pieceOk(bPart, atEnd, q)) return false;
+      }
+    }
+    const ways = new Set([...A.ways, ...B.ways]);
+    G.removeEdge(A.eid);
+    G.removeEdge(B.eid);
+    const touched = new Set();
+    const piece = (from, to, pts, srcEdge, frac, raw) => {
+      const f = G.resolve(from);
+      const t = G.resolve(to);
+      if (lenXY(pts) < 0.5 && f === t) return;
+      G.addEdge(f, t, pts, srcEdge.ways, srcEdge.src * frac, raw ? raw[0] : null, raw ? raw[1] : null);
+    };
+    const mergeAt = (x, y) => {
+      x = G.resolve(x);
+      y = G.resolve(y);
+      if (x === y) return x;
+      const merged = G.mergePoints(x, y, keepOneOf(x, y));
+      touched.add(merged);
+      return merged;
+    };
+    // one end of the stretch: side 0 = start, 1 = end
+    const joinEnd = (side) => {
+      const aAt = side === 0 ? a0 : a1;
+      const bAt = side === 0 ? b0 : b1;
+      const aNode = side === 0 ? aAt === 0 : aAt === LA;
+      const bNode = side === 0 ? bAt === 0 : bAt === LB;
+      const aEnd = side === 0 ? A.u : A.v;
+      const bEnd = side === 0 ? bView.u : bView.v;
+      const aPart = side === 0 ? (aNode ? null : subXY(A.pts, ca, 0, aAt)) : (aNode ? null : subXY(A.pts, ca, aAt, LA));
+      const bPart = side === 0 ? (bNode ? null : subXY(bView.pts, cb, 0, bAt)) : (bNode ? null : subXY(bView.pts, cb, bAt, LB));
+      const aFrac = side === 0 ? aAt / LA : (LA - aAt) / LA;
+      const bFrac = side === 0 ? bAt / LB : (LB - bAt) / LB;
+      const rawA = side === 0 ? [A.rawA, null] : [null, A.rawB];
+      const rawB = side === 0 ? [bView.rawA, null] : [null, bView.rawB];
+      const link = (endPid, P, part, srcEdge, frac, raw) => {
+        if (side === 0) piece(endPid, P, part, srcEdge, frac, raw);
+        else piece(P, endPid, part, srcEdge, frac, raw);
+      };
+      if (aNode && bNode) return mergeAt(aEnd, bEnd);
+      // One road ends here at a point, the other passes by: the point moves onto the centre
+      // line where the two roads start (stop) running together, and the passing road joins it.
+      const [ra, rb] = runAt[side];
+      const pa0 = atXY(A.pts, ca, ra);
+      const pb0 = atXY(bView.pts, cb, rb);
+      // (a real junction stays where it is; the centre line comes to it)
+      const meetAt = (P) => {
+        const pt = G.points.get(P);
+        if (!pt.real) {
+          const p = [(pa0[0] + pb0[0]) / 2, (pa0[1] + pb0[1]) / 2];
+          if (otherRoadsOk(P, p)) G.movePoint(P, p);
+        }
+        touched.add(P);
+        return P;
+      };
+      if (aNode) {
+        const P = G.resolve(aEnd);
+        link(bEnd, P, bPart, B, bFrac, rawB);
+        return meetAt(P);
+      }
+      if (bNode) {
+        const P = G.resolve(bEnd);
+        link(aEnd, P, aPart, A, aFrac, rawA);
+        return meetAt(P);
+      }
+      const pa = atXY(A.pts, ca, aAt);
+      const pb = atXY(bView.pts, cb, bAt);
+      const P = G.addPoint([(pa[0] + pb[0]) / 2, (pa[1] + pb[1]) / 2]); // where the roads part (a new point, between them)
+      link(aEnd, P, aPart, A, aFrac, rawA);
+      link(bEnd, P, bPart, B, bFrac, rawB);
+      touched.add(P);
+      return P;
+    };
+    const P0 = joinEnd(0);
+    const P1 = G.resolve(joinEnd(1));
+    const Q0 = G.resolve(P0);
+    // The two roads become one line: the course of the road both end points lie on (they stay
+    // on real junctions), else the line between the two
+    const subA = subXY(A.pts, ca, a0, a1);
+    const subB = subXY(bView.pts, cb, b0, b1);
+    const q0 = G.points.get(Q0).p;
+    const q1 = G.points.get(P1).p;
+    const offA = Math.hypot(q0[0] - subA[0][0], q0[1] - subA[0][1]) + Math.hypot(q1[0] - subA[subA.length - 1][0], q1[1] - subA[subA.length - 1][1]);
+    const offB = Math.hypot(q0[0] - subB[0][0], q0[1] - subB[0][1]) + Math.hypot(q1[0] - subB[subB.length - 1][0], q1[1] - subB[subB.length - 1][1]);
+    const center = Math.min(offA, offB) < 2 ? (offA <= offB ? subA : subB) : simplifyXY(averageXY(subA, subB), 0.5);
+    const src = A.src * ((a1 - a0) / LA) + B.src * ((b1 - b0) / LB);
+    const eid = G.addEdge(Q0, P1, center, ways, src);
+    if (eid !== null) {
+      const len = lenXY(G.edges.get(eid).pts);
+      cov.mergedM += Math.max(0, src - len);
+      G.edges.get(eid).src = len;
+    }
+    return touched;
+  }
+
+  // True if one of the points `from` reaches one of `to` along the roads within `limit` m
+  function linkedWithin(G, from, to, limit) {
+    const goal = new Set(to.map((x) => G.resolve(x)));
+    const dist = new Map();
+    const queue = [];
+    for (const x of from) {
+      const id = G.resolve(x);
+      if (goal.has(id)) return true;
+      dist.set(id, 0);
+      queue.push([0, id]);
+    }
+    const done = new Set();
+    while (queue.length > 0) {
+      let bi = 0;
+      for (let i = 1; i < queue.length; i++) if (queue[i][0] < queue[bi][0]) bi = i;
+      const [d, cur] = queue[bi];
+      queue[bi] = queue[queue.length - 1];
+      queue.pop();
+      if (done.has(cur)) continue;
+      done.add(cur);
+      if (goal.has(cur)) return true;
+      for (const eid of G.inc.get(cur) || []) {
+        const e = G.edges.get(eid);
+        const o = e.u === cur ? e.v : e.u;
+        const nd = d + lenXY(e.pts);
+        if (nd > limit || (dist.has(o) && dist.get(o) <= nd)) continue;
+        dist.set(o, nd);
+        queue.push([nd, o]);
+      }
+    }
+    return false;
+  }
+
+  // Roads that run side by side are merged only if they are already joined near each other
+  // (a road links them within PARALLEL_LINK_M + 2 r): two carriageways of one street. A
+  // road over another (a viaduct above a street) has no such link and both stay.
+  function* mergeParallelRoads(G, F, cov, r) {
+    let merges = 0;
+    const rejectedPairs = new Set();
+    for (let pass = 0; pass < 60; pass++) {
+      const pairs = yield* parallelCandidates(G);
+      const busy = new Set();
+      let changed = false;
+      for (const [ea, eb] of pairs) {
+        yield;
+        if (busy.has(ea) || busy.has(eb) || rejectedPairs.has(`${ea}|${eb}`)) continue;
+        const A = G.edges.get(ea);
+        const B = G.edges.get(eb);
+        if (!A || !B || A.u === A.v || B.u === B.v) continue;
+        const run = findParallelRun(G, A, B);
+        if (!run) continue;
+        if (!linkedWithin(G, [A.u, A.v], [B.u, B.v], PARALLEL_LINK_M + 2 * (r || 0))) continue;
+        const touched = applyParallelRun(G, run, F, cov, r);
+        if (!touched) {
+          rejectedPairs.add(`${ea}|${eb}`);
+          continue;
+        }
+        changed = true;
+        busy.add(ea);
+        busy.add(eb);
+        for (const pid of touched) for (const eid of G.inc.get(G.resolve(pid)) || []) busy.add(eid);
+        if (++merges >= PARALLEL_MAX_MERGES) return merges;
+      }
+      if (!changed) break;
+    }
+    return merges;
+  }
+
+  // Loops get two shape points (three points around), short loops belong to their point. A
+  // loop whose two halves run together (both carriageways of a dead-end street) is one road
+  // out to its far end. Roads between the same two points: one that stays close to another
+  // everywhere is the same road (one centre line); another route keeps a shape point in its
+  // middle.
+  function normalizeLoopsAndRoutes(G, F, cov) {
+    collapseTinyGaps(G);
+    // Removing a loop can turn a point into a pass-through; joining its two roads can make a
+    // new loop: repeat until no loop is left (each loop ends as 3+ different points or gone)
+    for (let round = 0; round < 20; round++) {
+      if (!normalizeLoopsOnce(G, cov)) break;
+    }
+    normalizeRoutes(G, cov);
+  }
+
+  function normalizeLoopsOnce(G, cov) {
+    const lostLoop = new Set();
+    let any = false;
+    for (const e of Array.from(G.edges.values())) {
+      if (e.u !== e.v || !G.edges.has(e.eid)) continue;
+      any = true;
+      const cum = cumXY(e.pts);
+      const L = cum[cum.length - 1];
+      if (L < LOOP_MIN_M) {
+        G.removeEdge(e.eid);
+        cov.mergedM += e.src;
+        lostLoop.add(e.u);
+        continue;
+      }
+      // A small loop with one way in (a turning loop, a block ring) is left out whole: no
+      // shape points, no dead end at its far side
+      if (L < SMALL_LOOP_M) {
+        G.removeEdge(e.eid);
+        cov.droppedM.smallLoop += e.src;
+        lostLoop.add(e.u);
+        continue;
+      }
+      const out = subXY(e.pts, cum, 0, L / 2);
+      const back = subXY(e.pts, cum, L / 2, L).reverse();
+      if (hausdorffXY(out, back) <= DUPLICATE_ROUTE_M) {
+        const center = simplifyXY(averageXY(out, back), 0.5);
+        const far = G.addPoint(center[center.length - 1]);
+        G.removeEdge(e.eid);
+        G.addEdge(e.u, far, center, e.ways, lenXY(center), e.rawA, null);
+        cov.mergedM += Math.max(0, e.src - lenXY(center));
+      } else {
+        // the two shape points where the three points (with the loop's own point) are farthest
+        // apart (a loop that doubles back near its point would put thirds next to each other)
+        const anchor = e.pts[0];
+        let bestPair = [L / 3, (2 * L) / 3];
+        let bestGap = -1;
+        const N = 24;
+        for (let i = 2; i < N - 3; i++) {
+          for (let j = i + 2; j < N - 1; j++) {
+            const s1 = (i * L) / N;
+            const s2 = (j * L) / N;
+            const p1 = atXY(e.pts, cum, s1);
+            const p2 = atXY(e.pts, cum, s2);
+            const gap = Math.min(Math.hypot(p1[0] - anchor[0], p1[1] - anchor[1]), Math.hypot(p2[0] - anchor[0], p2[1] - anchor[1]), Math.hypot(p1[0] - p2[0], p1[1] - p2[1]));
+            if (gap > bestGap + 1e-9) {
+              bestGap = gap;
+              bestPair = [s1, s2];
+            }
+          }
+        }
+        G.splitEdge(e.eid, bestPair, { shape: true });
+      }
+    }
+    // A point left with two roads by a removed loop is no junction any more: one road
+    for (const pid of lostLoop) contractPassThrough(G, pid);
+    return any;
+  }
+
+  function normalizeRoutes(G, cov) {
+    const groups = new Map();
+    for (const e of G.edges.values()) {
+      const k = cmpKey(e.u, e.v) < 0 ? `${e.u}|${e.v}` : `${e.v}|${e.u}`;
+      if (!groups.has(k)) groups.set(k, []);
+      groups.get(k).push(e.eid);
+    }
+    for (const list of groups.values()) {
+      if (list.length < 2) continue;
+      const es = list.map((id) => G.edges.get(id)).sort((x, y) => lenXY(x.pts) - lenXY(y.pts) || x.eid - y.eid);
+      const keep = es[0];
+      for (const e of es.slice(1)) {
+        const pts = e.u === keep.u ? e.pts : e.pts.slice().reverse();
+        const lk = lenXY(keep.pts);
+        const le = lenXY(pts);
+        const duplicate = hausdorffXY(pts, keep.pts) <= DUPLICATE_ROUTE_M;
+        if (!duplicate && (lk + le < SMALL_ROUTES_M || (lk < SHORT_ROUTE_M && le < SHORT_ROUTE_M))) {
+          // two short routes: the shorter one stays (the other cannot cut the board in two)
+          G.removeEdge(e.eid);
+          cov.droppedM.smallLoop += e.src;
+          continue;
+        }
+        if (duplicate) {
+          const before = keep.src + e.src;
+          const center = simplifyXY(averageXY(keep.pts, pts), 0.5);
+          center[0] = keep.pts[0];
+          center[center.length - 1] = keep.pts[keep.pts.length - 1];
+          keep.pts = center;
+          for (const w of e.ways) keep.ways.add(w);
+          G.removeEdge(e.eid);
+          const len = lenXY(center);
+          cov.mergedM += Math.max(0, before - len);
+          keep.src = len;
+        } else {
+          // the shape point goes where this route is farthest from the kept one
+          const ce = cumXY(pts);
+          const ck = cumXY(keep.pts);
+          const L = ce[ce.length - 1];
+          let bestS = L / 2;
+          let bestD = -1;
+          // (and away from every other point: routes sharing their first metres from one
+          // point would otherwise get shape points next to each other)
+          const nearestPoint = (q) => {
+            let m = Infinity;
+            for (const pt of G.points.values()) m = Math.min(m, Math.hypot(pt.p[0] - q[0], pt.p[1] - q[1]));
+            return m;
+          };
+          for (let k = 1; k < 20; k++) {
+            const sv = (k * L) / 20;
+            if (sv < 0.2 * L || sv > 0.8 * L) continue;
+            const q = atXY(pts, ce, sv);
+            const d = Math.min(nearestXY(keep.pts, ck, q).d, nearestPoint(q));
+            if (d > bestD + 1e-9) {
+              bestD = d;
+              bestS = sv;
+            }
+          }
+          G.splitEdge(e.eid, [e.u === keep.u ? bestS : L - bestS], { shape: true });
+        }
+      }
+    }
+  }
+
+  // A point with exactly two roads that is neither pinned (a junction that lost roads at the
+  // frame) nor a shape / mid point (a junction whose third road was removed): its two roads
+  // become one road.
+  function contractPassThrough(G, pid) {
+    const pt = G.points.get(pid);
+    if (!pt || pt.pin || pt.shape || pt.mid || G.degree(pid) !== 2) return false;
+    const [e1, e2] = Array.from(G.inc.get(pid)).map((id) => G.edges.get(id));
+    if (!e1 || !e2 || e1 === e2) return false;
+    const a = e1.u === pid ? e1.pts.slice().reverse() : e1.pts.slice(); // ... -> pid
+    const b = e2.u === pid ? e2.pts.slice() : e2.pts.slice().reverse(); // pid -> ...
+    const x = e1.u === pid ? e1.v : e1.u;
+    const y = e2.u === pid ? e2.v : e2.u;
+    if (x === pid || y === pid) return false;
+    const ways = new Set([...e1.ways, ...e2.ways]);
+    const src = e1.src + e2.src;
+    const rawX = e1.u === pid ? e1.rawB : e1.rawA;
+    const rawY = e2.u === pid ? e2.rawB : e2.rawA;
+    G.removePoint(pid);
+    G.addEdge(x, y, a.concat(b.slice(1)), ways, src, rawX, rawY);
+    return true;
+  }
+
+  // Two dead ends close together that face each other along one line are the same street,
+  // cut by a short piece the road filter leaves out (an arcade with covered=yes, a gate):
+  // they are joined by a straight road and are no points any more.
+  function joinFacingDeadEnds(G) {
+    const cosMax = Math.cos((FACING_MAX_DEG * Math.PI) / 180);
+    const ends = [];
+    for (const pt of G.points.values()) {
+      if (pt.pin || pt.shape || pt.mid || G.degree(pt.pid) !== 1) continue; // (a pinned junction is no dead end)
+      const e = G.edges.get(Array.from(G.inc.get(pt.pid))[0]);
+      if (e.u === e.v) continue;
+      const pts = e.v === pt.pid ? e.pts : e.pts.slice().reverse(); // ... -> the dead end
+      const cum = cumXY(pts);
+      const L = cum[cum.length - 1];
+      if (L <= 0) continue;
+      const back = atXY(pts, cum, Math.max(0, L - 10));
+      const dx = pt.p[0] - back[0];
+      const dy = pt.p[1] - back[1];
+      const dl = Math.hypot(dx, dy);
+      if (dl < 1e-6) continue;
+      ends.push({ pid: pt.pid, p: pt.p, dir: [dx / dl, dy / dl], eid: e.eid });
+    }
+    const pairs = [];
+    for (let i = 0; i < ends.length; i++) {
+      for (let j = i + 1; j < ends.length; j++) {
+        const a = ends[i];
+        const b = ends[j];
+        if (a.eid === b.eid) continue;
+        const vx = b.p[0] - a.p[0];
+        const vy = b.p[1] - a.p[1];
+        const d = Math.hypot(vx, vy);
+        if (d > FACING_MAX_M || d < 1e-6) continue;
+        const u = [vx / d, vy / d];
+        if (a.dir[0] * u[0] + a.dir[1] * u[1] < cosMax) continue; // a heads towards b
+        if (-(b.dir[0] * u[0] + b.dir[1] * u[1]) < cosMax) continue; // b heads towards a
+        if (-(a.dir[0] * b.dir[0] + a.dir[1] * b.dir[1]) < cosMax) continue; // on one line
+        pairs.push([d, a, b]);
+      }
+    }
+    pairs.sort((x, y) => x[0] - y[0] || cmpKey(x[1].pid, y[1].pid) || cmpKey(x[2].pid, y[2].pid));
+    const used = new Set();
+    let joined = 0;
+    for (const [, a, b] of pairs) {
+      if (used.has(a.pid) || used.has(b.pid) || !G.edges.has(a.eid) || !G.edges.has(b.eid)) continue;
+      used.add(a.pid);
+      used.add(b.pid);
+      const ea = G.edges.get(a.eid);
+      const eb = G.edges.get(b.eid);
+      const pa = ea.v === a.pid ? ea.pts : ea.pts.slice().reverse(); // x -> a
+      const pb = eb.u === b.pid ? eb.pts : eb.pts.slice().reverse(); // b -> y
+      const x = ea.v === a.pid ? ea.u : ea.v;
+      const y = eb.u === b.pid ? eb.v : eb.u;
+      const rawX = ea.v === a.pid ? ea.rawA : ea.rawB;
+      const rawY = eb.u === b.pid ? eb.rawB : eb.rawA;
+      const ways = new Set([...ea.ways, ...eb.ways]);
+      const src = ea.src + eb.src;
+      G.removePoint(a.pid);
+      G.removePoint(b.pid);
+      G.addEdge(x, y, pa.concat(pb), ways, src, rawX, rawY);
+      joined++;
+    }
+    return joined;
+  }
+
+  // A dead-end branch shorter than SHORT_SPUR_M has no point at its end: its stone would sit
+  // on top of the junction's. The branch is drawn from the junction (`tails`, not playable).
+  function dropShortSpurs(G, cov) {
+    const drop = [];
+    for (const pt of G.points.values()) {
+      if (pt.pin || pt.shape || pt.mid || G.degree(pt.pid) !== 1) continue; // (a pinned junction stays)
+      const e = G.edges.get(Array.from(G.inc.get(pt.pid))[0]);
+      const inner = e.u === pt.pid ? e.v : e.u;
+      if (inner === pt.pid || lenXY(e.pts) >= SHORT_SPUR_M) continue;
+      const ip = G.points.get(inner);
+      if (!ip || G.degree(inner) === 1) continue; // a 2-point road: not a branch
+      drop.push([pt.pid, e.eid, inner]);
+    }
+    for (const [pid, eid, inner] of drop) {
+      const e = G.edges.get(eid);
+      if (!e || !G.points.has(inner)) continue;
+      const pts = e.u === inner ? e.pts : e.pts.slice().reverse(); // inner -> dead end
+      G.tails.push({ pid: inner, pts, ways: new Set(e.ways), to: 'deadEnd' });
+      cov.tailM += e.src;
+      G.removePoint(pid);
+      G.points.get(inner).stub = true;
+    }
+    return drop.length;
+  }
+
+  // Way ids merged as one street (two carriageways): sameStreet(waysA, waysB) is true when the
+  // two lines belong to one such street.
+  function makeSameStreet(sets) {
+    const parent = new Map();
+    const find = (x) => {
+      while (parent.has(x) && parent.get(x) !== x) x = parent.get(x);
+      return x;
+    };
+    for (const set of sets) {
+      const list = Array.from(set);
+      for (const w of list) if (!parent.has(w)) parent.set(w, w);
+      for (let i = 1; i < list.length; i++) {
+        const a = find(list[0]);
+        const b = find(list[i]);
+        if (a !== b) parent.set(b, a);
+      }
+    }
+    const groupOf = (ways) => {
+      const gs = new Set();
+      for (const w of ways) if (parent.has(w)) gs.add(find(w));
+      return gs;
+    };
+    return (wa, wb) => {
+      const ga = groupOf(wa);
+      if (ga.size === 0) return false;
+      for (const g of groupOf(wb)) if (ga.has(g)) return true;
+      return false;
+    };
+  }
+
+  // After two carriageways were merged into one line, what is left of the other carriageway
+  // (a short stretch not merged, a short branch) is not drawn when it runs within
+  // DUPLICATE_ROUTE_M of the street's line: the street stays on one side, without switching.
+  // Only roads with an end of their own (a dead end, or a drawn-only piece).
+  function dropOtherCarriageway(G, sameStreet, cov) {
+    const lines = [];
+    for (const e of G.edges.values()) lines.push({ kind: 'edge', e, pts: e.pts, ways: e.ways, len: lenXY(e.pts) });
+    for (const t of G.tails) lines.push({ kind: 'tail', t, pts: t.pts, ways: t.ways, len: lenXY(t.pts) });
+    const alongside = (x, y) => {
+      const cum = cumXY(x.pts);
+      const cy = cumXY(y.pts);
+      const n = Math.max(2, Math.ceil(x.len / 2));
+      let near = 0;
+      const Ly = cy[cy.length - 1];
+      for (let k = 0; k <= n; k++) {
+        const hit = nearestXY(y.pts, cy, atXY(x.pts, cum, (k * x.len) / n));
+        // beside the line, not beyond its end (a line going on from its end is no remainder)
+        if (hit.d <= DUPLICATE_ROUTE_M && hit.s > 1 && hit.s < Ly - 1) near++;
+      }
+      return near >= 0.5 * (n + 1);
+    };
+    // (an end that is a junction left with one road by the frame is no loose end: it stays)
+    const loose = (l) => {
+      if (l.kind === 'tail') return true;
+      const du = G.degree(l.e.u) === 1 && !G.points.get(l.e.u).pin;
+      const dv = G.degree(l.e.v) === 1 && !G.points.get(l.e.v).pin;
+      return du !== dv && !(G.degree(l.e.u) === 1 && G.degree(l.e.v) === 1);
+    };
+    let dropped = 0;
+    const gone = new Set();
+    // a loose line goes when it runs alongside a longer line of the street that is no loose
+    // end (the street's own line), or alongside a shorter loose one (the one without a detour
+    // stays)
+    lines.forEach((l, i) => { l.order = i; });
+    lines.sort((x, y) => y.len - x.len || x.order - y.order);
+    for (const x of lines) {
+      if (!loose(x) || gone.has(x)) continue;
+      const other = lines.find((y) => y !== x && !gone.has(y) && sameStreet(x.ways, y.ways) &&
+        (loose(y) ? y.len < x.len || (y.len === x.len && y.order < x.order) : y.len > x.len) && alongside(x, y));
+      if (!other) continue;
+      gone.add(x);
+      dropped++;
+      cov.mergedM += x.kind === 'edge' ? x.e.src : 0;
+      if (x.kind === 'tail') {
+        G.tails = G.tails.filter((t) => t !== x.t);
+      } else {
+        const end = G.degree(x.e.u) === 1 && !G.points.get(x.e.u).pin ? x.e.u : x.e.v;
+        G.removePoint(end);
+      }
+    }
+    return dropped;
+  }
+
+  // Turn the point pid (one road) into a drawn-only piece from the point its road leads to.
+  // Pieces already drawn from pid are joined on. Returns false if not allowed: a road on its
+  // own (2 points), or a piece of TAIL_MAX_M or more.
+  function pointToTail(G, pid) {
+    const pt = G.points.get(pid);
+    if (!pt || G.degree(pid) !== 1) return false;
+    const e = G.edges.get(Array.from(G.inc.get(pid))[0]);
+    const inner = e.u === pid ? e.v : e.u;
+    if (inner === pid || G.degree(inner) === 1) return false;
+    const pts = e.u === inner ? e.pts : e.pts.slice().reverse(); // inner -> pid
+    const own = G.tails.filter((t) => t.pid === pid);
+    const extra = own.length ? Math.max(...own.map((t) => lenXY(t.pts))) : 0;
+    if (lenXY(pts) + extra >= TAIL_MAX_M) return false;
+    const ways = new Set(e.ways);
+    G.tails = G.tails.filter((t) => t.pid !== pid);
+    if (own.length === 0) {
+      G.tails.push({ pid: inner, pts, ways });
+    } else {
+      for (const t of own) G.tails.push({ pid: inner, pts: pts.concat(t.pts.slice(1)), ways: new Set([...ways, ...t.ways]) });
+    }
+    G.removePoint(pid);
+    G.points.get(inner).stub = true;
+    return true;
+  }
+
+  // Points closer than END_GAP_M that no road joins (two dead ends at a gap that do not face
+  // each other, a dead end beside another street's junction ...) are never joined by
+  // distance. The one with the shorter road (a dead end, its road under TAIL_MAX_M) gets no
+  // point: its road is drawn only; a junction left with one road by the frame only if the
+  // other cannot go. Junctions with more roads stay.
+  function resolveClosePoints(G) {
+    let n = 0;
+    for (let pass = 0; pass < 10; pass++) {
+      const pts = Array.from(G.points.values());
+      const pairs = [];
+      const CELL = END_GAP_M;
+      const cells = new Map();
+      for (const p of pts) {
+        const k = `${Math.floor(p.p[0] / CELL)},${Math.floor(p.p[1] / CELL)}`;
+        if (!cells.has(k)) cells.set(k, []);
+        cells.get(k).push(p);
+      }
+      for (const a of pts) {
+        const cx = Math.floor(a.p[0] / CELL);
+        const cy = Math.floor(a.p[1] / CELL);
+        for (let dx = -1; dx <= 1; dx++) {
+          for (let dy = -1; dy <= 1; dy++) {
+            for (const b of cells.get(`${cx + dx},${cy + dy}`) || []) {
+              if (cmpKey(b.pid, a.pid) <= 0) continue;
+              const d = Math.hypot(a.p[0] - b.p[0], a.p[1] - b.p[1]);
+              if (d < END_GAP_M) pairs.push([d, a.pid, b.pid]);
+            }
+          }
+        }
+      }
+      pairs.sort((x, y) => x[0] - y[0] || cmpKey(x[1], y[1]) || cmpKey(x[2], y[2]));
+      let changed = false;
+      for (const [, x, y] of pairs) {
+        if (!G.points.has(x) || !G.points.has(y)) continue;
+        const joined = Array.from(G.inc.get(x)).some((eid) => { const e = G.edges.get(eid); return e.u === y || e.v === y; });
+        if (joined) continue;
+        const branch = (pid) => {
+          const pt = G.points.get(pid);
+          if (pt.shape || pt.mid || G.degree(pid) !== 1) return Infinity;
+          const e = G.edges.get(Array.from(G.inc.get(pid))[0]);
+          const inner = e.u === pid ? e.v : e.u;
+          if (G.degree(inner) === 1) return Infinity;
+          return lenXY(e.pts);
+        };
+        const pinOf = (pid) => (G.points.get(pid).pin ? 1 : 0);
+        const order = [[branch(x), x], [branch(y), y]].sort((p, q) => pinOf(p[1]) - pinOf(q[1]) || p[0] - q[0]);
+        for (const [len, pid] of order) {
+          if (!Number.isFinite(len)) continue;
+          if (pointToTail(G, pid)) {
+            n++;
+            changed = true;
+            break;
+          }
+        }
+      }
+      if (!changed) break;
+    }
+    return n;
+  }
+
+  // Two points closer than MIN_POINT_GAP_M cannot both be played (their stones would cover
+  // each other). They are one point only when a road already joins them (the two ends of a
+  // road of almost no length). Points that no road joins are never joined by distance alone
+  // (see resolveClosePoints).
+  function collapseTinyGaps(G) {
+    const gap = (a, b) => Math.hypot(a.p[0] - b.p[0], a.p[1] - b.p[1]);
+    const mergeTwo = (x, y) => {
+      const a = G.points.get(x);
+      const b = G.points.get(y);
+      return G.mergePoints(x, y, [(a.p[0] + b.p[0]) / 2, (a.p[1] + b.p[1]) / 2]);
+    };
+    for (let pass = 0; pass < 10; pass++) {
+      let changed = false;
+      for (const e of Array.from(G.edges.values()).sort((x, y) => x.eid - y.eid)) {
+        if (!G.edges.has(e.eid) || e.u === e.v) continue;
+        if (gap(G.points.get(e.u), G.points.get(e.v)) >= MIN_POINT_GAP_M) continue;
+        mergeTwo(e.u, e.v);
+        changed = true;
+      }
+      if (!changed) break;
+    }
+  }
+
+  // The dead-end setting, decided in this one place. Off: real dead ends are removed branch
+  // by branch (a point left with one road is removed next). A junction left with one road by
+  // the frame (pinned) is no dead end: it stays.
+  function applyDeadEndPolicy(G, includeDeadEnds, cov) {
+    if (includeDeadEnds) return 0;
+    let removed = 0;
+    for (;;) {
+      const dead = Array.from(G.points.values()).filter((p) => G.degree(p.pid) === 0 || (G.degree(p.pid) === 1 && !p.pin));
+      if (dead.length === 0) break;
+      for (const p of dead) {
+        for (const eid of Array.from(G.inc.get(p.pid))) cov.droppedM.deadEnd += G.edges.get(eid).src;
+        G.removePoint(p.pid);
+        removed++;
+      }
+    }
+    return removed;
+  }
+
+  // Only the largest connected part stays (most points, then the longest roads); the other
+  // parts are left out (counted as smallComponent). Returns the number of parts left out.
+  function keepLargestComponent(G, cov) {
+    const seen = new Set();
+    const comps = [];
+    for (const pid of Array.from(G.points.keys()).sort(cmpKey)) {
+      if (seen.has(pid)) continue;
+      const comp = [pid];
+      seen.add(pid);
+      let len = 0;
+      for (let i = 0; i < comp.length; i++) {
+        for (const eid of G.inc.get(comp[i])) {
+          const e = G.edges.get(eid);
+          if (e.u === comp[i]) len += e.src;
+          const o = e.u === comp[i] ? e.v : e.u;
+          if (!seen.has(o)) {
+            seen.add(o);
+            comp.push(o);
+          }
+        }
+      }
+      comps.push({ comp, len, first: pid });
+    }
+    if (comps.length <= 1) return 0;
+    comps.sort((a, b) => b.comp.length - a.comp.length || b.len - a.len || cmpKey(a.first, b.first));
+    for (const { comp, len } of comps.slice(1)) {
+      cov.droppedM.smallComponent += len;
+      for (const pid of comp) G.removePoint(pid);
+    }
+    const left = new Set(G.points.keys());
+    G.tails = G.tails.filter((t) => left.has(t.pid));
+    return comps.length - 1;
+  }
+
+  // The points of the roads that are no dead-end branches (2-core: points with one road are
+  // taken off again and again)
+  function twoCore(G) {
+    const deg = new Map();
+    for (const pid of G.points.keys()) deg.set(pid, 0);
+    for (const e of G.edges.values()) {
+      deg.set(e.u, deg.get(e.u) + 1);
+      deg.set(e.v, deg.get(e.v) + 1);
+    }
+    const core = new Set(G.points.keys());
+    const stack = Array.from(core).filter((pid) => deg.get(pid) <= 1);
+    while (stack.length) {
+      const pid = stack.pop();
+      if (!core.has(pid)) continue;
+      core.delete(pid);
+      for (const eid of G.inc.get(pid)) {
+        const e = G.edges.get(eid);
+        const o = e.u === pid ? e.v : e.u;
+        if (o === pid || !core.has(o)) continue;
+        deg.set(o, deg.get(o) - 1);
+        if (deg.get(o) <= 1) stack.push(o);
+      }
+    }
+    return core;
+  }
+
+  // The board's outline: the outer boundary of the lines of the 2-core, as a polygon
+  // [[x, y], ...] (closed: the last point is the first). The lines are made planar first:
+  // every segment is split where another one crosses or touches it (roads crossing without a
+  // shared point, bridges, and lines lying on top of each other), then the outer face is
+  // walked from the westernmost point, always taking the next line clockwise. Null if the
+  // core has no line.
+  function* outerRingXY(G, core) {
+    const segs = [];
+    for (const e of G.edges.values()) {
+      if (!core.has(e.u) || !core.has(e.v)) continue;
+      for (let i = 1; i < e.pts.length; i++) {
+        const a = e.pts[i - 1];
+        const b = e.pts[i];
+        if (Math.hypot(b[0] - a[0], b[1] - a[1]) > 1e-6) segs.push([a, b]);
+      }
+    }
+    if (segs.length === 0) return null;
+    const EPS = 1e-3;
+    const cuts = segs.map(() => [0, 1]);
+    const CELL = 25;
+    const cells = new Map();
+    segs.forEach(([a, b], i) => {
+      for (let cx = Math.floor(Math.min(a[0], b[0]) / CELL); cx <= Math.floor(Math.max(a[0], b[0]) / CELL); cx++) {
+        for (let cy = Math.floor(Math.min(a[1], b[1]) / CELL); cy <= Math.floor(Math.max(a[1], b[1]) / CELL); cy++) {
+          const k = `${cx},${cy}`;
+          if (!cells.has(k)) cells.set(k, []);
+          cells.get(k).push(i);
+        }
+      }
+    });
+    // t of point q on segment i if q lies on it (within EPS), else null
+    const onSeg = (i, q) => {
+      const [a, b] = segs[i];
+      const dx = b[0] - a[0];
+      const dy = b[1] - a[1];
+      const l2 = dx * dx + dy * dy;
+      const t = ((q[0] - a[0]) * dx + (q[1] - a[1]) * dy) / l2;
+      if (t <= 0 || t >= 1) return null;
+      const px = a[0] + dx * t - q[0];
+      const py = a[1] + dy * t - q[1];
+      return px * px + py * py <= EPS * EPS ? t : null;
+    };
+    const done = new Set();
+    let work = 0;
+    for (const list of cells.values()) {
+      work += list.length * list.length;
+      if (work > 20000) {
+        work = 0;
+        yield;
+      }
+      for (let x = 0; x < list.length; x++) {
+        for (let y = x + 1; y < list.length; y++) {
+          const i = Math.min(list[x], list[y]);
+          const j = Math.max(list[x], list[y]);
+          const key = `${i},${j}`;
+          if (done.has(key)) continue;
+          done.add(key);
+          const [p, p2] = segs[i];
+          const [q, q2] = segs[j];
+          for (const [s, o, pt] of [[i, j, q], [i, j, q2], [j, i, p], [j, i, p2]]) {
+            const t = onSeg(s, pt);
+            if (t !== null) cuts[s].push(t);
+          }
+          const rx = p2[0] - p[0];
+          const ry = p2[1] - p[1];
+          const sx = q2[0] - q[0];
+          const sy = q2[1] - q[1];
+          const d = rx * sy - ry * sx;
+          if (Math.abs(d) < 1e-12) continue;
+          const t = ((q[0] - p[0]) * sy - (q[1] - p[1]) * sx) / d;
+          const u = ((q[0] - p[0]) * ry - (q[1] - p[1]) * rx) / d;
+          if (t > 1e-9 && t < 1 - 1e-9 && u > 1e-9 && u < 1 - 1e-9) {
+            cuts[i].push(t);
+            cuts[j].push(u);
+          }
+        }
+      }
+    }
+    const pos = new Map();
+    const adj = new Map();
+    const keyOf = (pt) => {
+      const k = `${Math.round(pt[0] * 100)},${Math.round(pt[1] * 100)}`;
+      if (!pos.has(k)) {
+        pos.set(k, pt);
+        adj.set(k, new Map());
+      }
+      return k;
+    };
+    segs.forEach(([a, b], i) => {
+      const ts = Array.from(new Set(cuts[i])).sort((x, y) => x - y);
+      let prev = keyOf(a);
+      for (let n = 1; n < ts.length; n++) {
+        const t = ts[n];
+        const k = keyOf(t === 1 ? b : [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t]);
+        if (k !== prev) {
+          const pa = pos.get(prev);
+          const pb = pos.get(k);
+          adj.get(prev).set(k, Math.atan2(pb[1] - pa[1], pb[0] - pa[0]));
+          adj.get(k).set(prev, Math.atan2(pa[1] - pb[1], pa[0] - pb[0]));
+          prev = k;
+        }
+      }
+    });
+    yield;
+    let start = null;
+    for (const [k, p] of pos) {
+      if (adj.get(k).size === 0) continue;
+      const s = start && pos.get(start);
+      if (!s || p[0] < s[0] || (p[0] === s[0] && p[1] < s[1])) start = k;
+    }
+    if (start === null) return null;
+    // the line leaving v next clockwise from the direction `theta` (the one with the largest
+    // angle below theta, else the largest one)
+    const nextFrom = (v, theta) => {
+      let best = null;
+      let bestA = -Infinity;
+      let top = null;
+      let topA = -Infinity;
+      for (const [w, a] of adj.get(v)) {
+        if (a < theta - 1e-12 && a > bestA) {
+          best = w;
+          bestA = a;
+        }
+        if (a > topA || (a === topA && w < top)) {
+          top = w;
+          topA = a;
+        }
+      }
+      return best !== null ? best : top;
+    };
+    let halfEdges = 0;
+    for (const m of adj.values()) halfEdges += m.size;
+    const firstV = nextFrom(start, Math.PI); // (the outside lies west of the westernmost point)
+    const poly = [pos.get(start)];
+    let u = start;
+    let v = firstV;
+    for (let guard = 0; guard <= halfEdges; guard++) {
+      poly.push(pos.get(v));
+      const w = nextFrom(v, adj.get(v).get(u));
+      u = v;
+      v = w;
+      if (u === start && v === firstV) break;
+    }
+    return poly;
+  }
+
+  // Inside the polygon (even-odd), or within tol of its outline
+  function makeInsideTest(poly, tol) {
+    let minX = Infinity;
+    let maxX = -Infinity;
+    let minY = Infinity;
+    let maxY = -Infinity;
+    for (const p of poly) {
+      minX = Math.min(minX, p[0]);
+      maxX = Math.max(maxX, p[0]);
+      minY = Math.min(minY, p[1]);
+      maxY = Math.max(maxY, p[1]);
+    }
+    return (q) => {
+      if (q[0] < minX - tol || q[0] > maxX + tol || q[1] < minY - tol || q[1] > maxY + tol) return false;
+      let inside = false;
+      for (let i = 1; i < poly.length; i++) {
+        const a = poly[i - 1];
+        const b = poly[i];
+        if (pointSegDistXY(q, a, b) <= tol) return true;
+        if ((a[1] > q[1]) !== (b[1] > q[1]) && q[0] < a[0] + ((q[1] - a[1]) * (b[0] - a[0])) / (b[1] - a[1])) inside = !inside;
+      }
+      return inside;
+    };
+  }
+
+  // The board's outline is a ring of roads (the outer boundary of the 2-core). A dead-end
+  // branch with any point or line outside it is left out whole (no line drawn); branches
+  // inside it (on the outline included) stay. Drawn-only pieces outside it go too.
+  // Returns { branches: number left out, ring: polygon or null }.
+  function* trimOutsideRing(G, cov) {
+    const core = twoCore(G);
+    if (core.size === 0) return { branches: 0, ring: null };
+    const ring = yield* outerRingXY(G, core);
+    if (!ring) return { branches: 0, ring: null };
+    const inside = makeInsideTest(ring, RING_TOL_M);
+    const lineInside = (pts) => {
+      for (let i = 0; i < pts.length; i++) {
+        if (!inside(pts[i])) return false;
+        if (i === 0) continue;
+        const a = pts[i - 1];
+        const b = pts[i];
+        const n = Math.ceil(Math.hypot(b[0] - a[0], b[1] - a[1]) / 2);
+        for (let k = 1; k < n; k++) if (!inside([a[0] + ((b[0] - a[0]) * k) / n, a[1] + ((b[1] - a[1]) * k) / n])) return false;
+      }
+      return true;
+    };
+    const tailsAt = new Map();
+    for (const t of G.tails) {
+      if (!tailsAt.has(t.pid)) tailsAt.set(t.pid, []);
+      tailsAt.get(t.pid).push(t);
+    }
+    const dropTails = new Set();
+    let branches = 0;
+    let done = 0;
+    for (const c of Array.from(core).sort(cmpKey)) {
+      if (++done % 200 === 0) yield;
+      for (const t of tailsAt.get(c) || []) if (!lineInside(t.pts)) dropTails.add(t);
+      for (const eid of Array.from(G.inc.get(c)).sort((x, y) => x - y)) {
+        const e0 = G.edges.get(eid);
+        if (!e0) continue;
+        const o0 = e0.u === c ? e0.v : e0.u;
+        if (core.has(o0)) continue;
+        // the branch: every point reached from o0 without passing c
+        const pts = [o0];
+        const seen = new Set([c, o0]);
+        const edges = [e0];
+        for (let i = 0; i < pts.length; i++) {
+          for (const id of G.inc.get(pts[i])) {
+            const e = G.edges.get(id);
+            const o = e.u === pts[i] ? e.v : e.u;
+            if (seen.has(o)) continue;
+            seen.add(o);
+            pts.push(o);
+            edges.push(e);
+          }
+        }
+        let ok = edges.every((e) => lineInside(e.pts));
+        if (ok) for (const pid of pts) for (const t of tailsAt.get(pid) || []) if (!lineInside(t.pts)) ok = false;
+        if (ok) continue;
+        branches++;
+        for (const e of edges) cov.droppedM.outsideRing += e.src;
+        for (const pid of pts) {
+          for (const t of tailsAt.get(pid) || []) dropTails.add(t);
+          G.removePoint(pid);
+        }
+      }
+    }
+    if (dropTails.size) G.tails = G.tails.filter((t) => !dropTails.has(t));
+    return { branches, ring };
+  }
+
+  function subdivideLong(G, spacing, minGap) {
+    const CELL = Math.max(minGap, 1);
+    const grid = new Map();
+    const key = (p) => `${Math.floor(p[0] / CELL)},${Math.floor(p[1] / CELL)}`;
+    const add = (p) => {
+      const k = key(p);
+      if (!grid.has(k)) grid.set(k, []);
+      grid.get(k).push(p);
+    };
+    const tooClose = (p) => {
+      const cx = Math.floor(p[0] / CELL);
+      const cy = Math.floor(p[1] / CELL);
+      for (let dx = -1; dx <= 1; dx++) {
+        for (let dy = -1; dy <= 1; dy++) {
+          for (const q of grid.get(`${cx + dx},${cy + dy}`) || []) if (Math.hypot(p[0] - q[0], p[1] - q[1]) < minGap) return true;
+        }
+      }
+      return false;
+    };
+    for (const pt of G.points.values()) add(pt.p);
+    for (const e of Array.from(G.edges.values()).sort((x, y) => x.eid - y.eid)) {
+      const cum = cumXY(e.pts);
+      const L = cum[cum.length - 1];
+      if (L < spacing * 1.35) continue;
+      const n = Math.max(2, Math.round(L / spacing));
+      const at = [];
+      for (let k = 1; k < n; k++) {
+        const s = (k * L) / n;
+        const p = atXY(e.pts, cum, s);
+        if (tooClose(p)) continue;
+        at.push(s);
+        add(p);
+      }
+      if (at.length > 0) G.splitEdge(e.eid, at, { mid: true });
+    }
+  }
+
+  function emptyBoard(rect) {
+    return { nodes: new Map(), edges: [], bridges: [], tails: [], boardBounds: rect, frameBounds: rect, stats: { nodeCount: 0, edgeCount: 0, avgDegree: 0, maxDegree: 0 } };
+  }
+
+  // Build the board inside `rect` (a generator: it yields between the steps, so the caller
+  // can hand control back to the browser and stop on cancel).
+  function* buildBoardGen(prep, rect, options) {
+    const r = Number.isFinite(options.mergeRadiusMeters) && options.mergeRadiusMeters > 0 ? options.mergeRadiusMeters : DEFAULT_MERGE_RADIUS_M;
+    const includeDeadEnds = options.includeDeadEnds !== false;
+    const F = makeFrame(rect);
+    const cov = newCoverage();
+    const t0 = nowMs();
+
+    // 1. Clip the ways to the rectangle
+    const nodeXY = new Map();
+    const posOf = (id) => {
+      let v = nodeXY.get(id);
+      if (v) return v;
+      const [lat, lon] = prep.nodes.get(id);
+      let [x, y] = F.xy(lat, lon);
+      if (x >= F.x0 - CLAMP_TOL_M && x <= F.x1 + CLAMP_TOL_M && y >= F.y0 - CLAMP_TOL_M && y <= F.y1 + CLAMP_TOL_M) {
+        // within CLAMP_TOL_M of the outline (either side): on it
+        if (Math.abs(x - F.x0) <= CLAMP_TOL_M) x = F.x0;
+        else if (Math.abs(x - F.x1) <= CLAMP_TOL_M) x = F.x1;
+        if (Math.abs(y - F.y0) <= CLAMP_TOL_M) y = F.y0;
+        else if (Math.abs(y - F.y1) <= CLAMP_TOL_M) y = F.y1;
+      }
+      v = { p: [x, y], inside: x >= F.x0 && x <= F.x1 && y >= F.y0 && y <= F.y1 };
+      nodeXY.set(id, v);
+      return v;
+    };
+    const vertPos = new Map();
+    const cutVerts = new Set();
+    const rawSegs = [];
+    const FE = { x0: F.x0 - CLAMP_TOL_M, x1: F.x1 + CLAMP_TOL_M, y0: F.y0 - CLAMP_TOL_M, y1: F.y1 + CLAMP_TOL_M };
+    const areaSegs = new Map(); // node pair -> length inside (area outlines left out)
+    const roadPairs = new Set(); // node pairs of the roads used
+    const eLat = 5 / F.ky;
+    const eLon = 5 / F.kx;
+    const dropAreas = options.dropAreaOutlines === undefined ? DROP_AREA_OUTLINES : !!options.dropAreaOutlines;
+    for (const w of prep.ways) {
+      if (w.maxLat < rect.south - eLat || w.minLat > rect.north + eLat || w.maxLon < rect.west - eLon || w.minLon > rect.east + eLon) continue;
+      if (dropAreas && w.areaLike) {
+        // left out as an area outline: its length inside the rectangle is counted (each
+        // segment once, and not if a road uses it too), clipped like a road
+        for (let i = 1; i < w.nodes.length; i++) {
+          const a = w.nodes[i - 1];
+          const b = w.nodes[i];
+          if (a === b) continue;
+          const pa = posOf(a).p;
+          const pb = posOf(b).p;
+          const L = Math.hypot(pb[0] - pa[0], pb[1] - pa[1]);
+          let t = clipParams(pa, pb, F);
+          if (!t || (t[1] - t[0]) * L < CUT_EPS_M) t = clipParams(pa, pb, FE);
+          if (!t) continue;
+          areaSegs.set(cmpKey(a, b) < 0 ? `${a}|${b}` : `${b}|${a}`, (t[1] - t[0]) * L);
+        }
+        continue;
+      }
+      for (let i = 1; i < w.nodes.length; i++) {
+        const a = w.nodes[i - 1];
+        const b = w.nodes[i];
+        const pa = posOf(a);
+        const pb = posOf(b);
+        roadPairs.add(cmpKey(a, b) < 0 ? `${a}|${b}` : `${b}|${a}`);
+        if (pa.inside && pb.inside) {
+          vertPos.set(a, pa.p);
+          vertPos.set(b, pb.p);
+          rawSegs.push([a, b, w.id]);
+          continue;
+        }
+        // Clipped to the rectangle itself (a road crossing the frame is cut where it crosses).
+        // A segment that never enters the rectangle but runs within CLAMP_TOL_M outside it (a
+        // road along the frame) is clipped to the widened rectangle and laid on the outline.
+        const [lo, hi, plo, phi] = cmpKey(a, b) < 0 ? [a, b, pa, pb] : [b, a, pb, pa];
+        const segL = Math.hypot(phi.p[0] - plo.p[0], phi.p[1] - plo.p[1]);
+        let t = clipParams(plo.p, phi.p, F);
+        if (!t || (t[1] - t[0]) * segL < CUT_EPS_M) t = clipParams(plo.p, phi.p, FE);
+        if (!t) continue;
+        const at = (tt) => F.snap([plo.p[0] + (phi.p[0] - plo.p[0]) * tt, plo.p[1] + (phi.p[1] - plo.p[1]) * tt]);
+        const q0 = at(t[0]);
+        const q1 = at(t[1]);
+        if (Math.hypot(q1[0] - q0[0], q1[1] - q0[1]) < CUT_EPS_M) continue;
+        let k0 = lo;
+        let k1 = hi;
+        if (t[0] > 0) {
+          k0 = `c:${lo}:${hi}:${t[0].toFixed(9)}`;
+          vertPos.set(k0, q0);
+          cutVerts.add(k0);
+        } else vertPos.set(lo, plo.p);
+        if (t[1] < 1) {
+          k1 = `c:${lo}:${hi}:${t[1].toFixed(9)}`;
+          vertPos.set(k1, q1);
+          cutVerts.add(k1);
+        } else vertPos.set(hi, phi.p);
+        rawSegs.push([k0, k1, w.id]);
+      }
+    }
+    for (const [k, len] of areaSegs) if (!roadPairs.has(k)) cov.areaM += len;
+    if (rawSegs.length > MAX_CLIPPED_SEGMENTS) {
+      throw new StreetGoError('too-many', '範囲内の道路が多すぎます。範囲を狭めてください');
+    }
+    // Points closer than ZERO_SEG_M along a road are one point
+    const parent = new Map();
+    const find = (k) => {
+      while (parent.has(k)) k = parent.get(k);
+      return k;
+    };
+    for (const [a, b] of rawSegs) {
+      const pa = vertPos.get(a);
+      const pb = vertPos.get(b);
+      if (Math.hypot(pa[0] - pb[0], pa[1] - pb[1]) >= ZERO_SEG_M) continue;
+      const ra = find(a);
+      const rb = find(b);
+      if (ra === rb) continue;
+      const [keepK, dropK] = cmpKey(ra, rb) < 0 ? [ra, rb] : [rb, ra];
+      parent.set(dropK, keepK);
+      if (cutVerts.has(dropK)) cutVerts.add(keepK);
+    }
+    const segMap = new Map();
+    const adj = new Map();
+    const segKeyOf = (a, b) => (cmpKey(a, b) < 0 ? `${a}|${b}` : `${b}|${a}`);
+    for (const [a0, b0, wid] of rawSegs) {
+      const a = find(a0);
+      const b = find(b0);
+      if (a === b) continue;
+      const k = segKeyOf(a, b);
+      let s = segMap.get(k);
+      if (!s) {
+        const pa = vertPos.get(a);
+        const pb = vertPos.get(b);
+        s = { len: Math.hypot(pa[0] - pb[0], pa[1] - pb[1]), ways: new Set() };
+        segMap.set(k, s);
+        if (!adj.has(a)) adj.set(a, new Set());
+        if (!adj.has(b)) adj.set(b, new Set());
+        adj.get(a).add(b);
+        adj.get(b).add(a);
+        cov.totalM += s.len;
+      }
+      s.ways.add(wid);
+    }
+    if (adj.size === 0) return emptyBoard(rect);
+    // Distance to the nearest input road (segments inside the rectangle), for checks of moved
+    // lines; searched up to 30 m
+    const roadCells = new Map();
+    const RC = 20;
+    for (const [k] of segMap) {
+      const [ka, kb] = k.split('|');
+      const pa = vertPos.get(vertPos.has(ka) ? ka : Number(ka));
+      const pb = vertPos.get(vertPos.has(kb) ? kb : Number(kb));
+      if (!pa || !pb) continue;
+      for (let cx = Math.floor(Math.min(pa[0], pb[0]) / RC); cx <= Math.floor(Math.max(pa[0], pb[0]) / RC); cx++) {
+        for (let cy = Math.floor(Math.min(pa[1], pb[1]) / RC); cy <= Math.floor(Math.max(pa[1], pb[1]) / RC); cy++) {
+          const ck = `${cx},${cy}`;
+          if (!roadCells.has(ck)) roadCells.set(ck, []);
+          roadCells.get(ck).push([pa, pb]);
+        }
+      }
+    }
+    const offRoad = (p) => {
+      const cx = Math.floor(p[0] / RC);
+      const cy = Math.floor(p[1] / RC);
+      let m = 30;
+      for (let dx = -2; dx <= 2; dx++) {
+        for (let dy = -2; dy <= 2; dy++) {
+          for (const [a, b] of roadCells.get(`${cx + dx},${cy + dy}`) || []) m = Math.min(m, pointSegDistXY(p, a, b));
+        }
+      }
+      return m;
+    };
+    yield 'clip';
+
+    // 1b. Roads leaving the rectangle are used up to their last junction (or real dead end)
+    //     inside: from a road's cut at the frame back to the first point with another degree
+    //     than 2, nothing is kept (no road, no drawn-only piece). A road crossing without a
+    //     junction inside is left out whole. A junction losing roads this way stays a point
+    //     (`pinned`), even with one or two roads left.
+    const deg = (k) => adj.get(k).size;
+    const isCutEnd = (k) => deg(k) === 1 && (cutVerts.has(k) ||
+      (typeof k === 'number' && (prep.rawDeg.get(k) || 0) > 1 && F.onFrame(vertPos.get(k))));
+    const pinned = new Set();
+    {
+      const dropSeg = new Set();
+      const stops = new Set();
+      for (const s of Array.from(adj.keys()).sort(cmpKey)) {
+        if (!isCutEnd(s)) continue;
+        const first = adj.get(s).values().next().value;
+        let prev = s;
+        let cur = first;
+        dropSeg.add(segKeyOf(s, first));
+        for (let guard = 0; deg(cur) === 2 && guard < 1e6; guard++) {
+          let nxt;
+          for (const nb of adj.get(cur)) if (nb !== prev) nxt = nb;
+          if (nxt === undefined) break;
+          const sk = segKeyOf(cur, nxt);
+          if (dropSeg.has(sk)) break;
+          dropSeg.add(sk);
+          prev = cur;
+          cur = nxt;
+        }
+        if (deg(cur) >= 3) stops.add(cur);
+      }
+      for (const sk of dropSeg) {
+        const s = segMap.get(sk);
+        if (!s) continue;
+        cov.leavingM += s.len; // not a road of the board: outside the coverage's denominator
+        cov.totalM -= s.len;
+        segMap.delete(sk);
+      }
+      for (const [k, nbs] of adj) {
+        for (const nb of Array.from(nbs)) if (dropSeg.has(segKeyOf(k, nb))) nbs.delete(nb);
+      }
+      for (const k of Array.from(adj.keys())) if (adj.get(k).size === 0) adj.delete(k);
+      for (const k of stops) if (adj.has(k) && deg(k) <= 2) pinned.add(k);
+    }
+    if (adj.size === 0) return emptyBoard(rect);
+
+    // 2. Chains between key points (degree other than 2, and pinned junctions); rings
+    //    without one get a shape point
+    const isJ = (k) => deg(k) >= 3 || pinned.has(k);
+    const keys = Array.from(adj.keys()).sort(cmpKey);
+    const usedSeg = new Set();
+    const chains = [];
+    const walk = (start, first) => {
+      const path = [start, first];
+      usedSeg.add(segKeyOf(start, first));
+      let prev = start;
+      let cur = first;
+      while (deg(cur) === 2 && !pinned.has(cur) && cur !== start) {
+        let nxt;
+        for (const nb of adj.get(cur)) if (nb !== prev) nxt = nb;
+        if (nxt === undefined) break;
+        const sk = segKeyOf(cur, nxt);
+        if (usedSeg.has(sk)) break;
+        usedSeg.add(sk);
+        path.push(nxt);
+        prev = cur;
+        cur = nxt;
+      }
+      const ways = new Set();
+      for (let i = 1; i < path.length; i++) for (const wid of segMap.get(segKeyOf(path[i - 1], path[i])).ways) ways.add(wid);
+      const pts = path.map((k) => vertPos.get(k));
+      return { a: path[0], b: path[path.length - 1], pts, ways, len: lenXY(pts) };
+    };
+    const ringAnchors = new Set();
+    for (const k of keys) {
+      if (deg(k) === 2 && !pinned.has(k)) continue;
+      for (const nb of Array.from(adj.get(k)).sort(cmpKey)) {
+        if (!usedSeg.has(segKeyOf(k, nb))) chains.push(walk(k, nb));
+      }
+    }
+    for (const k of keys) {
+      if (deg(k) !== 2 || pinned.has(k)) continue;
+      const nbs = Array.from(adj.get(k)).sort(cmpKey);
+      if (nbs.every((nb) => usedSeg.has(segKeyOf(k, nb)))) continue;
+      ringAnchors.add(k);
+      chains.push(walk(k, nbs.find((nb) => !usedSeg.has(segKeyOf(k, nb)))));
+    }
+    yield 'chains';
+
+    // 3. Merge junctions closer than r that a road joins within 2 r
+    const junctionKeys = keys.filter(isJ);
+    const jAdj = new Map();
+    for (const c of chains) {
+      if (c.a === c.b || !isJ(c.a) || !isJ(c.b)) continue;
+      for (const [x, y] of [[c.a, c.b], [c.b, c.a]]) {
+        if (!jAdj.has(x)) jAdj.set(x, new Map());
+        const m = jAdj.get(x);
+        if (!m.has(y) || c.len < m.get(y)) m.set(y, c.len);
+      }
+    }
+    const linked = makeRoadLink(jAdj, 2 * r);
+    const jList = junctionKeys.map((k) => {
+      const [lat, lon] = F.ll(vertPos.get(k));
+      return { id: k, lat, lon, deg: deg(k), p: vertPos.get(k) };
+    });
+    const clusters = clusterJunctions(jList, r, linked);
+    const G = makeWorkGraph();
+    G.offRoad = offRoad;
+    G.maxOffRoad = (pts) => {
+      const cum = cumXY(pts);
+      const L = cum[cum.length - 1];
+      const n = Math.max(1, Math.ceil(L / 2));
+      let m = 0;
+      for (let k = 0; k <= n; k++) m = Math.max(m, offRoad(atXY(pts, cum, (k * L) / n)));
+      return m;
+    };
+    const pointOf = new Map();
+    // A merged junction is placed on one of its real junctions (never between them). The
+    // roads of the others reach it along the real roads joining the members (the short roads
+    // inside the merged junction). Chosen: the member with the least line off the roads (a
+    // member another one cannot reach by such roads costs the straight connector), then the
+    // one with most roads, then the one nearest the centre of the members.
+    const clusterOfKey = new Map();
+    clusters.forEach((c, ci) => { for (const m of c.members) clusterOfKey.set(m.id, ci); });
+    const inner = clusters.map(() => new Map()); // member key -> [{ to, pts (from -> to), len }]
+    const outerEnds = clusters.map(() => new Map()); // member key -> number of roads leaving the cluster
+    const outerLen = clusters.map(() => new Map()); // member key -> length of those roads
+    for (const ch of chains) {
+      const ca = clusterOfKey.get(ch.a);
+      const cb = clusterOfKey.get(ch.b);
+      if (ca !== undefined && ca === cb && ch.a !== ch.b) {
+        const m = inner[ca];
+        if (!m.has(ch.a)) m.set(ch.a, []);
+        if (!m.has(ch.b)) m.set(ch.b, []);
+        m.get(ch.a).push({ to: ch.b, pts: ch.pts, len: ch.len });
+        m.get(ch.b).push({ to: ch.a, pts: ch.pts.slice().reverse(), len: ch.len });
+        continue;
+      }
+      for (const [k, ci] of [[ch.a, ca], [ch.b, cb]]) {
+        if (ci === undefined) continue;
+        outerEnds[ci].set(k, (outerEnds[ci].get(k) || 0) + 1);
+        outerLen[ci].set(k, (outerLen[ci].get(k) || 0) + ch.len);
+      }
+    }
+    // shortest road path inside a cluster from `src` to every member: Map key -> pts (src -> key)
+    const pathsFrom = (ci, src) => {
+      const dist = new Map([[src, 0]]);
+      const via = new Map([[src, [vertPos.get(src)]]]);
+      const done = new Set();
+      for (;;) {
+        let cur = null;
+        for (const [k, d] of dist) if (!done.has(k) && (cur === null || d < dist.get(cur))) cur = k;
+        if (cur === null) break;
+        done.add(cur);
+        for (const step of inner[ci].get(cur) || []) {
+          const nd = dist.get(cur) + step.len;
+          if (nd > 2 * r + 1e-9) continue;
+          if (!dist.has(step.to) || nd < dist.get(step.to)) {
+            dist.set(step.to, nd);
+            via.set(step.to, via.get(cur).concat(step.pts.slice(1)));
+          }
+        }
+      }
+      return via;
+    };
+    const routeTo = new Map(); // member key -> pts from the chosen member to it
+    clusters.forEach((c, ci) => {
+      let best = null;
+      if (c.members.length > 1) {
+        let cx = 0;
+        let cy = 0;
+        for (const m of c.members) {
+          cx += m.p[0];
+          cy += m.p[1];
+        }
+        cx /= c.members.length;
+        cy /= c.members.length;
+        for (const m of c.members) {
+          const paths = pathsFrom(ci, m.id);
+          let off = 0;
+          for (const [k, n] of outerEnds[ci]) {
+            if (k === m.id || paths.has(k)) continue;
+            off += n * Math.hypot(vertPos.get(k)[0] - m.p[0], vertPos.get(k)[1] - m.p[1]);
+          }
+          const cand = { m, paths, off, roads: outerEnds[ci].get(m.id) || 0, along: outerLen[ci].get(m.id) || 0, centre: Math.hypot(m.p[0] - cx, m.p[1] - cy) };
+          const better = (x, y) => {
+            if (Math.abs(x.off - y.off) > 1e-9) return x.off < y.off;
+            if (x.roads !== y.roads) return x.roads > y.roads;
+            // then the member the longer roads start from (the main street goes straight on)
+            if (Math.abs(x.along - y.along) > 1e-6) return x.along > y.along;
+            if (Math.abs(x.centre - y.centre) > 1e-9) return x.centre < y.centre;
+            return cmpKey(x.m.id, y.m.id) < 0;
+          };
+          if (!best || better(cand, best)) best = cand;
+        }
+      }
+      const at = best ? best.m : c.members[0];
+      const pin = c.members.some((m) => pinned.has(m.id));
+      const pid = G.addPoint(at.p, { members: c.members.map((m) => m.p), real: true, pin });
+      for (const m of c.members) {
+        pointOf.set(m.id, pid);
+        if (best && m.id !== at.id && best.paths.has(m.id)) routeTo.set(m.id, best.paths.get(m.id));
+      }
+    });
+    for (const k of keys) {
+      if (isJ(k)) continue;
+      if (deg(k) === 2 && !ringAnchors.has(k)) continue;
+      pointOf.set(k, G.addPoint(vertPos.get(k), { shape: ringAnchors.has(k) }));
+    }
+    if (G.points.size > EARLY_TOO_MANY_FACTOR * MAX_BOARD_NODES) {
+      throw new StreetGoError('too-many', `交点が多すぎます(${G.points.size}点以上)。範囲を狭めてください`);
+    }
+    const kindOfKey = (k) => (isJ(k) ? 'junction' : 'end');
+    for (const c of chains) {
+      const u = pointOf.get(c.a);
+      const v = pointOf.get(c.b);
+      if (u === v && c.a !== c.b && c.len <= 2 * r) {
+        cov.mergedM += c.len; // the short road inside a merged junction
+        continue;
+      }
+      let pts = c.pts.slice();
+      // a road from a member that is not the merged point comes along the real roads to it
+      const ra = routeTo.get(c.a);
+      const rb = routeTo.get(c.b);
+      if (ra) pts = ra.concat(pts.slice(1));
+      if (rb) pts = pts.concat(rb.slice().reverse().slice(1));
+      const pu = G.points.get(u).p;
+      const pv = G.points.get(v).p;
+      // A junction's end moves to the merged point. If moving the end would take a long road
+      // off its course (more than END_MOVE_DEV_M; the road at least twice as long as the
+      // move and not shorter than r), or leave a road to a dead end much shorter,
+      // the road keeps its course and gets a short connector to the merged point. Short roads
+      // (dense blocks) are drawn straight to the merged point instead.
+      const moveEnd = (list, p, atStart, farKind) => {
+        const endIdx = atStart ? 0 : list.length - 1;
+        if (list[endIdx][0] === p[0] && list[endIdx][1] === p[1]) return list;
+        const replaced = list.slice();
+        replaced[endIdx] = p;
+        const keepCourse = atStart ? [p].concat(list) : list.concat([p]);
+        const moveLen = Math.hypot(list[endIdx][0] - p[0], list[endIdx][1] - p[1]);
+        if (c.len >= Math.max(r, 2 * moveLen) && maxDeviationXY(replaced, list) > END_MOVE_DEV_M) return keepCourse;
+        if (farKind !== 'junction' && lenXY(replaced) < Math.min(r / 3, 0.5 * c.len)) return keepCourse;
+        return replaced;
+      };
+      pts = moveEnd(pts, pu, true, kindOfKey(c.b));
+      pts = moveEnd(pts, pv, false, kindOfKey(c.a));
+      G.addEdge(u, v, pts, c.ways, c.len, c.pts[0], c.pts[c.pts.length - 1]);
+    }
+    // Dead ends facing each other across a short gap: one road (again after each round: a
+    // joined road may face the next gap)
+    let facingJoined = 0;
+    for (let round = 0; round < 50; round++) {
+      const n = joinFacingDeadEnds(G);
+      facingJoined += n;
+      if (n === 0) break;
+    }
+    yield 'merge';
+
+    // 4. Roads running side by side -> one centre line over that stretch
+    const parallelMerges = yield* mergeParallelRoads(G, F, cov, r);
+    yield 'parallel';
+
+    // 5. Loops and second routes
+    normalizeLoopsAndRoutes(G, F, cov);
+    // 6. Dead ends (one place)
+    const deadEndsRemoved = applyDeadEndPolicy(G, includeDeadEnds, cov);
+    // 7. Only the largest connected part; its outline is a ring of roads (dead-end branches
+    //    leaving it are left out); then short dead-end branches and points too close to others
+    //    become drawn-only pieces (these only take off ends: the part stays one)
+    const partsDropped = keepLargestComponent(G, cov);
+    const outside = yield* trimOutsideRing(G, cov);
+    yield 'ring';
+    const shortSpurs = dropShortSpurs(G, cov);
+    const closeResolved = resolveClosePoints(G);
+    const sameStreet = makeSameStreet(G.streetWays);
+    const remaindersDropped = dropOtherCarriageway(G, sameStreet, cov);
+    if (options.subdivideLongRoads && options.subdivideSpacingMeters >= 20) {
+      subdivideLong(G, options.subdivideSpacingMeters, Math.max(r, 1));
+    }
+    if (G.points.size === 0) return emptyBoard(rect);
+    if (G.points.size > EARLY_TOO_MANY_FACTOR * MAX_BOARD_NODES) {
+      throw new StreetGoError('too-many', `交点が多すぎます(${G.points.size}点以上)。範囲を狭めてください`);
+    }
+    yield 'normalize';
+
+    // 8. Board in latitude / longitude
+    const idOf = new Map();
+    let seq = 0;
+    for (const pid of G.points.keys()) idOf.set(pid, `n${++seq}`);
+    const nodes = new Map();
+    const memberPos = new Map();
+    const preKind = new Map();
+    const fixed = new Set();
+    for (const pt of G.points.values()) {
+      const id = idOf.get(pt.pid);
+      const [lat, lon] = F.ll(pt.p);
+      nodes.set(id, { id, lat, lon, isMidpoint: !!(pt.mid || pt.shape), neighbors: new Set() });
+      if (pt.stub) fixed.add(id); // a drawn-only piece starts here: the point stays
+      if (pt.real) fixed.add(id); // a merged junction sits on a real junction: it stays
+      if (pt.pin && G.degree(pt.pid) <= 2) nodes.get(id).pinned = true; // a junction left with one or two roads by the frame
+      if (pt.members && pt.members.length >= 2) memberPos.set(id, pt.members.map((m) => F.ll(m)));
+      const d = G.degree(pt.pid);
+      preKind.set(id, pt.mid ? 'midpoint' : pt.shape && d === 2 ? 'shape' : d === 1 ? 'deadEnd' : 'junction');
+    }
+    let edges = [];
+    for (const e of G.edges.values()) {
+      let u = idOf.get(e.u);
+      let v = idOf.get(e.v);
+      let coords = e.pts.map((p) => F.ll(p));
+      let rawEnds = [F.ll(e.rawA), F.ll(e.rawB)];
+      if (u > v) {
+        [u, v] = [v, u];
+        coords = coords.reverse();
+        rawEnds = [rawEnds[1], rawEnds[0]];
+      }
+      nodes.get(u).neighbors.add(v);
+      nodes.get(v).neighbors.add(u);
+      edges.push({
+        u,
+        v,
+        coords,
+        roadCoords: coords,
+        length: polylineLength(coords),
+        rawEnds,
+        endShift: endShiftMeters(coords, rawEnds),
+        wayIds: Array.from(e.ways).sort(cmpKey),
+        srcLength: e.src
+      });
+    }
+    edges.sort((a, b) => (a.u < b.u ? -1 : a.u > b.u ? 1 : a.v < b.v ? -1 : a.v > b.v ? 1 : 0));
+
+    // 9. Merged junctions beside their road go onto it (junctions only)
+    const minDeg = (id) => (preKind.get(id) === 'deadEnd' ? 1 : 2);
+    const aligned = yield* alignPointsOntoRoadsGen(nodes, edges, r, memberPos, {
+      canMove: (id) => preKind.get(id) === 'junction' && !fixed.has(id),
+      minDegreeOf: minDeg
+    });
+    yield 'align';
+
+    // 10. Simpler drawn lines
+    const edgesOut = yield* buildDisplayShapesGen(aligned.nodes, aligned.edges, rect);
+    const finalNodes = aligned.nodes;
+    for (const [id, n] of finalNodes) {
+      const d = n.neighbors.size;
+      const pk = preKind.get(id);
+      n.kind = pk === 'midpoint' || pk === 'shape' ? pk : d === 1 ? 'deadEnd' : 'junction';
+    }
+    // Pieces drawn but not played on (short dead-end branches, points too close to others)
+    const tails = [];
+    for (const t of G.tails) {
+      const id = idOf.get(t.pid);
+      const n = id && finalNodes.get(id);
+      if (!n) continue;
+      const coords = t.pts.map((p) => F.ll(p));
+      coords[0] = [n.lat, n.lon];
+      tails.push({ node: id, coords, wayIds: Array.from(t.ways).sort(cmpKey) });
+    }
+    // Crossings of drawn lines without a shared point, drawn-only pieces included (they are
+    // not joined to anything they cross either)
+    const bridges = yield* findBridges(finalNodes, edgesOut, tails, (a, b) => sameStreet(new Set(a), new Set(b)) || a.some((w) => b.includes(w)));
+
+    // stats
+    let keptLen = 0;
+    for (const e of edgesOut) keptLen += Number.isFinite(e.srcLength) ? e.srcLength : e.length;
+    const kinds = { junction: 0, deadEnd: 0, shape: 0, midpoint: 0 };
+    const degreeHistogram = {};
+    for (const n of finalNodes.values()) {
+      kinds[n.kind] = (kinds[n.kind] || 0) + 1;
+      const d = n.neighbors.size;
+      degreeHistogram[d] = (degreeHistogram[d] || 0) + 1;
+    }
+    // parts counted on the board handed to the game (after midpoints and moves)
+    const finalSizes = [];
+    {
+      const seenF = new Set();
+      for (const id of finalNodes.keys()) {
+        if (seenF.has(id)) continue;
+        let size = 0;
+        const st = [id];
+        seenF.add(id);
+        while (st.length) {
+          size++;
+          for (const nb of finalNodes.get(st.pop()).neighbors) if (!seenF.has(nb)) { seenF.add(nb); st.push(nb); }
+        }
+        finalSizes.push(size);
+      }
+      finalSizes.sort((a, b) => b - a);
+    }
+    // (one part: only the largest is kept; no warning is left to give)
+    const warnings = [];
+    // Coverage of the input roads inside the rectangle: the denominator is every road of the
+    // query cut to the rectangle (area outlines included), with what was left out by reason.
+    // Pieces of roads leaving the rectangle (beyond their last junction inside) are no roads
+    // of the board: not in the denominator, their length is given as `leavingRange`.
+    // `tailM` is measured on the drawn-only pieces as they are output.
+    let tailLen = 0;
+    for (const t of tails) tailLen += polylineLength(t.coords);
+    const roadsM = cov.totalM;
+    const allM = roadsM + cov.areaM;
+    const lostRoads = cov.droppedM.deadEnd + cov.droppedM.smallComponent + cov.droppedM.smallLoop + cov.droppedM.outsideRing;
+    const coverage = {
+      totalM: Math.round(allM),
+      roadsM: Math.round(roadsM),
+      keptM: Math.round(Math.min(roadsM, keptLen)),
+      mergedM: Math.round(cov.mergedM),
+      tailM: Math.round(tailLen),
+      droppedM: {
+        areaOutline: Math.round(cov.areaM),
+        leavingRange: Math.round(cov.leavingM),
+        deadEnd: Math.round(cov.droppedM.deadEnd),
+        smallComponent: Math.round(cov.droppedM.smallComponent),
+        smallLoop: Math.round(cov.droppedM.smallLoop),
+        outsideRing: Math.round(cov.droppedM.outsideRing)
+      },
+      rate: allM > 0 ? +((allM - cov.areaM - lostRoads) / allM).toFixed(4) : 1,
+      rateRoads: roadsM > 0 ? +((roadsM - lostRoads) / roadsM).toFixed(4) : 1
+    };
+    return {
+      nodes: finalNodes,
+      edges: edgesOut,
+      bridges,
+      tails,
+      boardBounds: rect,
+      frameBounds: rect, // the frame drawn: the rectangle (a place's board: see fitFrame)
+      // the board's outline (outer boundary of its ring roads, as the roads ran before their
+      // lines were simplified), or null when the board has no ring
+      outline: outside.ring ? outside.ring.map((p) => F.ll(p)) : null,
+      stats: {
+        ...computeGraphStats(finalNodes, edgesOut),
+        degreeHistogram,
+        kinds,
+        components: finalSizes.length,
+        componentSizes: finalSizes,
+        partsDropped,
+        outsideBranches: outside.branches,
+        crossingsRemaining: bridges.length,
+        oneStreetCrossings: bridges.oneStreetCrossings,
+        bridges: bridges.length,
+        parallelMerges,
+        facingJoined,
+        shortSpurs,
+        closeResolved,
+        remaindersDropped,
+        tails: tails.length,
+        deadEndsRemoved,
+        alignedPoints: aligned.applied.length,
+        alignedMoves: aligned.applied.map((a) => ({ point: a.point, form: a.form, road: a.road, movedM: Math.round(a.movedM * 10) / 10 })),
+        coverage,
+        quality: { ok: warnings.length === 0, warnings },
+        buildMs: Math.round(nowMs() - t0)
+      }
+    };
+  }
+
+  function runGenSync(gen) {
+    let r = gen.next();
+    while (!r.done) r = gen.next();
+    return r.value;
+  }
+
+  // Runs a board generator, giving control back to the browser every ~30 ms; a cancel
+  // (signal) stops it at the next step.
+  async function runGenAsync(gen, signal) {
+    let last = nowMs();
+    let r = gen.next();
+    while (!r.done) {
+      throwIfAborted(signal);
+      if (nowMs() - last > 30) {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        throwIfAborted(signal);
+        last = nowMs();
+      }
+      r = gen.next();
+    }
+    throwIfAborted(signal);
+    return r.value;
+  }
+
+  // Square of half side `half` metres around (lat, lon) (sides as distanceMeters measures them)
+  function squareBounds(lat, lon, half) {
+    const dLat = half / 111195;
+    const dLon = half / (111195 * Math.max(1e-6, Math.cos((lat * Math.PI) / 180)));
+    return { south: lat - dLat, north: lat + dLat, west: lon - dLon, east: lon + dLon };
+  }
+
+  function cornerDistance(lat, lon, b) {
+    let far = 0;
+    for (const [la, lo] of [[b.south, b.west], [b.south, b.east], [b.north, b.west], [b.north, b.east]]) {
+      far = Math.max(far, distanceMeters(lat, lon, la, lo));
+    }
+    return far;
+  }
+
+  // Square board for a place: the side is searched (both ways) so the final number of points
+  // (end points included) is within SQUARE_MIN_RATIO..SQUARE_MAX_RATIO x target, or else as
+  // close to it as found, never past MAX_BOARD_NODES. The corners stay within coverageM.
+  // Returns { graph, hitCoverage, evaluations }.
+  function* searchSquareGen(prep, lat, lon, options, coverageM) {
+    const target = options.targetNodes || 81;
+    const minN = SQUARE_MIN_RATIO * target;
+    const maxN = Math.min(MAX_BOARD_NODES, SQUARE_MAX_RATIO * target);
+    const coverage = Number.isFinite(coverageM) ? coverageM : Infinity;
+    // Largest half side whose corners stay within the coverage
+    let maxHalf = 4000;
+    if (Number.isFinite(coverage)) {
+      maxHalf = coverage / Math.SQRT2;
+      while (maxHalf > 1 && cornerDistance(lat, lon, squareBounds(lat, lon, maxHalf)) > coverage) maxHalf *= 0.995;
+    }
+    const minHalf = 15;
+    // First guess: the square holding about 0.7 x target raw junctions
+    const cos = Math.max(1e-6, Math.cos((lat * Math.PI) / 180));
+    const cheb = prep.junctionIds.map((id) => {
+      const [la, lo] = prep.nodes.get(id);
+      return Math.max(Math.abs(la - lat) * 110540, Math.abs(lo - lon) * 111320 * cos);
+    }).sort((a, b) => a - b);
+    let half = cheb.length ? cheb[Math.min(cheb.length - 1, Math.max(0, Math.round(0.7 * target) - 1))] + 10 : 200;
+    half = Math.max(minHalf, Math.min(maxHalf, half));
+    const tried = [];
+    let best = null;
+    const score = (n) => (n >= minN && n <= maxN ? 0 : 1) * 1e6 + Math.abs(n - target);
+    let lo = null; // largest half with too few points
+    let hi = null; // smallest half with too many points
+    let hitCoverage = false;
+    let bestHalf = minHalf;
+    for (let iter = 0; iter < 16; iter++) {
+      const rect = squareBounds(lat, lon, half);
+      let g = null;
+      let count;
+      try {
+        g = yield* buildBoardGen(prep, rect, options);
+        count = g.nodes.size;
+      } catch (err) {
+        if (!err || err.kind !== 'too-many') throw err;
+        count = Infinity;
+      }
+      tried.push({ half: Math.round(half * 10) / 10, count });
+      if (g && count <= MAX_BOARD_NODES && (!best || score(count) < score(best.nodes.size))) {
+        best = g;
+        bestHalf = half;
+        best.stats.sideM = Math.round(2 * half);
+      }
+      if (count >= minN && count <= maxN) break;
+      if (count < minN) {
+        lo = half;
+        if (half >= maxHalf - 0.5) {
+          hitCoverage = true;
+          break;
+        }
+        half = hi !== null ? (lo + hi) / 2 : Math.min(maxHalf, half * 1.3);
+      } else {
+        hi = half;
+        if (half <= minHalf + 0.5) break;
+        half = lo !== null ? (lo + hi) / 2 : Math.max(minHalf, half / 1.3);
+      }
+      if (lo !== null && hi !== null && hi - lo < 1) break;
+    }
+    if (!best) {
+      // nothing within the limit: the smallest square tried decides the error
+      const rect = squareBounds(lat, lon, minHalf);
+      best = yield* buildBoardGen(prep, rect, options);
+    }
+    best.stats.search = tried;
+    // The square's position: moved a little (up to SHIFT_MAX_M east-west and north-south) so
+    // that its sides do not run along roads (see shiftSquareGen)
+    const shifted = yield* shiftSquareGen(prep, lat, lon, bestHalf, best, options, coverage, score);
+    best = shifted.graph;
+    best.frameBounds = fitFrame(best);
+    return { graph: best, hitCoverage: hitCoverage && best.nodes.size < minN, evaluations: tried.length + shifted.builds };
+  }
+
+  // Length of roads running along the sides of a rectangle: road pieces (of SHIFT_PIECE_M at
+  // most) within SHIFT_NEAR_M of a side (inside or outside), at most SHIFT_ANGLE_DEG off its
+  // direction. Built once for the area around (lat, lon) the shifted squares can cover;
+  // returns (bounds) => metres.
+  function makeSideRoadScore(prep, lat, lon, reachM, dropAreas) {
+    const ky = 111195;
+    const kx = 111195 * Math.max(1e-6, Math.cos((lat * Math.PI) / 180));
+    const box = squareBounds(lat, lon, reachM);
+    const tan = Math.tan((SHIFT_ANGLE_DEG * Math.PI) / 180);
+    const hx = [];
+    const hy = [];
+    const hl = [];
+    const vx = [];
+    const vy = [];
+    const vl = [];
+    for (const w of prep.ways) {
+      if (dropAreas && w.areaLike) continue;
+      if (w.maxLat < box.south || w.minLat > box.north || w.maxLon < box.west || w.minLon > box.east) continue;
+      for (let i = 1; i < w.nodes.length; i++) {
+        const [la0, lo0] = prep.nodes.get(w.nodes[i - 1]);
+        const [la1, lo1] = prep.nodes.get(w.nodes[i]);
+        const x0 = (lo0 - lon) * kx;
+        const y0 = (la0 - lat) * ky;
+        const dx = (lo1 - lon) * kx - x0;
+        const dy = (la1 - lat) * ky - y0;
+        const L = Math.hypot(dx, dy);
+        if (L < 1e-6) continue;
+        const east = Math.abs(dy) <= tan * Math.abs(dx);
+        const north = Math.abs(dx) <= tan * Math.abs(dy);
+        if (!east && !north) continue;
+        const n = Math.ceil(L / SHIFT_PIECE_M);
+        for (let k = 0; k < n; k++) {
+          const x = x0 + (dx * (k + 0.5)) / n;
+          const y = y0 + (dy * (k + 0.5)) / n;
+          if (east) { hx.push(x); hy.push(y); hl.push(L / n); }
+          if (north) { vx.push(x); vy.push(y); vl.push(L / n); }
+        }
+      }
+    }
+    return (b) => {
+      const x0 = (b.west - lon) * kx;
+      const x1 = (b.east - lon) * kx;
+      const y0 = (b.south - lat) * ky;
+      const y1 = (b.north - lat) * ky;
+      let sum = 0;
+      for (let i = 0; i < hx.length; i++) {
+        if (hx[i] < x0 || hx[i] > x1) continue;
+        if (Math.abs(hy[i] - y0) <= SHIFT_NEAR_M) sum += hl[i];
+        if (Math.abs(hy[i] - y1) <= SHIFT_NEAR_M) sum += hl[i];
+      }
+      for (let i = 0; i < vx.length; i++) {
+        if (vy[i] < y0 || vy[i] > y1) continue;
+        if (Math.abs(vx[i] - x0) <= SHIFT_NEAR_M) sum += vl[i];
+        if (Math.abs(vx[i] - x1) <= SHIFT_NEAR_M) sum += vl[i];
+      }
+      return sum;
+    };
+  }
+
+  // The square of side 2 x half found around (lat, lon) is moved (centre up to SHIFT_MAX_M
+  // east-west and north-south, in SHIFT_STEP_M steps; corners within the coverage) to where
+  // the fewest roads run along its sides. Candidates are ranked by that length (then by the
+  // distance moved); only a few are built (SHIFT_MAX_BUILDS), and only those whose count of
+  // raw junctions stays within SHIFT_JUNCTION_SHARE of the found square's. A candidate is
+  // taken when its board is in the target band (or, if the found one is not, closer to the
+  // target) and has less road along its sides. Deterministic.
+  function* shiftSquareGen(prep, lat, lon, half, graph, options, coverage, score) {
+    const dropAreas = options.dropAreaOutlines === undefined ? DROP_AREA_OUTLINES : !!options.dropAreaOutlines;
+    const sideScore = makeSideRoadScore(prep, lat, lon, half + SHIFT_MAX_M + SHIFT_NEAR_M + SHIFT_PIECE_M, dropAreas);
+    const cos = Math.max(1e-6, Math.cos((lat * Math.PI) / 180));
+    const centre = (dx, dy) => [lat + dy / 111195, lon + dx / (111195 * cos)];
+    const base = sideScore(graph.boardBounds);
+    const out = { graph, builds: 0 };
+    graph.stats.shift = { dx: 0, dy: 0, sideRoadM: Math.round(base), sideRoadM0: Math.round(base) };
+    if (base <= 0 || graph.nodes.size === 0) return out;
+    const junctionsIn = (b) => {
+      let n = 0;
+      for (const id of prep.junctionIds) {
+        const [la, lo] = prep.nodes.get(id);
+        if (la >= b.south && la <= b.north && lo >= b.west && lo <= b.east) n++;
+      }
+      return n;
+    };
+    const j0 = junctionsIn(graph.boardBounds);
+    const cands = [];
+    for (let dx = -SHIFT_MAX_M; dx <= SHIFT_MAX_M; dx += SHIFT_STEP_M) {
+      for (let dy = -SHIFT_MAX_M; dy <= SHIFT_MAX_M; dy += SHIFT_STEP_M) {
+        if (dx === 0 && dy === 0) continue;
+        const [la, lo] = centre(dx, dy);
+        const b = squareBounds(la, lo, half);
+        if (cornerDistance(lat, lon, b) > coverage) continue;
+        const sc = sideScore(b);
+        if (sc >= base) continue;
+        cands.push({ dx, dy, b, sc, dist: Math.hypot(dx, dy) });
+      }
+    }
+    cands.sort((p, q) => p.sc - q.sc || p.dist - q.dist || p.dx - q.dx || p.dy - q.dy);
+    yield;
+    // in the target band: 0 (then the road along the sides decides); else the distance to it
+    const band = (n) => (score(n) >= 1e6 ? score(n) : 0);
+    let bestKey = [band(graph.nodes.size), base, 0];
+    const better = (k) => k[0] < bestKey[0] || (k[0] === bestKey[0] && (k[1] < bestKey[1] || (k[1] === bestKey[1] && k[2] < bestKey[2])));
+    for (const c of cands) {
+      if (out.builds >= SHIFT_MAX_BUILDS) break;
+      if (Math.abs(junctionsIn(c.b) - j0) > SHIFT_JUNCTION_SHARE * Math.max(j0, 1)) continue;
+      out.builds++;
+      let g = null;
+      try {
+        g = yield* buildBoardGen(prep, c.b, options);
+      } catch (err) {
+        if (!err || err.kind !== 'too-many') throw err;
+        continue;
+      }
+      if (g.nodes.size > MAX_BOARD_NODES) continue;
+      const key = [band(g.nodes.size), c.sc, c.dist];
+      if (!better(key)) continue;
+      bestKey = key;
+      g.stats.search = graph.stats.search;
+      g.stats.sideM = graph.stats.sideM;
+      g.stats.shift = { dx: c.dx, dy: c.dy, sideRoadM: Math.round(c.sc), sideRoadM0: Math.round(base) };
+      out.graph = g;
+      if (key[0] === 0) break; // in the band, with the least road along the sides tried so far
+    }
+    return out;
+  }
+
+  // The frame of a board made for a place: its points and drawn lines (roads, drawn-only
+  // pieces) with a margin of max(FRAME_PAD_M, FRAME_PAD_SHARE x the extent) on each axis, cut
+  // to the square the roads were cut to (boardBounds). The roads leaving the square end at
+  // their last junction inside, so the square itself would leave an empty band at its sides.
+  function fitFrame(g) {
+    const b = g.boardBounds;
+    let minLat = Infinity;
+    let maxLat = -Infinity;
+    let minLon = Infinity;
+    let maxLon = -Infinity;
+    const add = ([la, lo]) => {
+      if (la < minLat) minLat = la;
+      if (la > maxLat) maxLat = la;
+      if (lo < minLon) minLon = lo;
+      if (lo > maxLon) maxLon = lo;
+    };
+    for (const n of g.nodes.values()) add([n.lat, n.lon]);
+    for (const e of g.edges) for (const c of e.coords) add(c);
+    for (const t of g.tails || []) for (const c of t.coords) add(c);
+    if (!(maxLat >= minLat && maxLon >= minLon)) return b;
+    const cos = Math.max(0.2, Math.cos((((minLat + maxLat) / 2) * Math.PI) / 180));
+    const padLat = Math.max(FRAME_PAD_M / 110540, (maxLat - minLat) * FRAME_PAD_SHARE);
+    const padLon = Math.max(FRAME_PAD_M / (111320 * cos), (maxLon - minLon) * FRAME_PAD_SHARE);
+    return {
+      south: Math.max(b.south, minLat - padLat),
+      north: Math.min(b.north, maxLat + padLat),
+      west: Math.max(b.west, minLon - padLon),
+      east: Math.min(b.east, maxLon + padLon)
+    };
+  }
+
+  // Board from road data (synchronous; for tests and tools). options.bounds: the rectangle as
+  // it is; otherwise a square around (centerLat, centerLon) (options.coverageM: the radius
+  // the data is complete for).
+  function buildRoadGraph(elements, centerLat, centerLon, options = {}) {
+    const prep = prepareRoadData(elements);
+    const t0 = nowMs();
+    let g;
+    if (options.bounds) {
+      g = runGenSync(buildBoardGen(prep, options.bounds, options));
+    } else {
+      const res = runGenSync(searchSquareGen(prep, centerLat, centerLon, options, options.coverageM));
+      g = res.graph;
+      g.stats.hitCoverage = res.hitCoverage;
+    }
+    g.stats.totalMs = Math.round(nowMs() - t0);
+    return g;
+  }
+
+  // True if segments a0-a1 and b0-b1 cross (each has its ends on both sides of the other)
+  function crossesProperly(a0, a1, b0, b1) {
+    const side = (p, q, r) => (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0]);
+    const E = 1e-6;
+    const d1 = side(b0, b1, a0);
+    const d2 = side(b0, b1, a1);
+    const d3 = side(a0, a1, b0);
+    const d4 = side(a0, a1, b1);
+    return ((d1 > E && d2 < -E) || (d1 < -E && d2 > E)) && ((d3 > E && d4 < -E) || (d3 < -E && d4 > E));
+  }
+
+  // Crossings of drawn roads without a shared point (bridges / overpasses). The longer road
+  // is drawn on top: `overCoords` is its piece around the crossing.
+  function* findBridges(nodes, roadEdges, tails = [], oneStreet = null) {
+    // drawn-only pieces take part as lines from their point to a point of their own
+    const edges = roadEdges.concat(tails.map((t, i) => ({ u: t.node, v: `~tail${i}`, coords: t.coords, length: polylineLength(t.coords), tail: true, wayIds: t.wayIds })));
+    if (edges.length === 0) return [];
+    const proj = makeMetricProjector(nodes);
+    const polys = edges.map((e) => e.coords.map(([la, lo]) => proj(la, lo)));
+    const pos = new Map();
+    for (const [id, n] of nodes) pos.set(id, proj(n.lat, n.lon));
+    const CELL = 60;
+    const cells = new Map();
+    polys.forEach((p, i) => {
+      const b = bboxXY(p, 1);
+      for (let cx = Math.floor(b.minX / CELL); cx <= Math.floor(b.maxX / CELL); cx++) {
+        for (let cy = Math.floor(b.minY / CELL); cy <= Math.floor(b.maxY / CELL); cy++) {
+          const k = `${cx},${cy}`;
+          if (!cells.has(k)) cells.set(k, []);
+          cells.get(k).push(i);
+        }
+      }
+    });
+    const pairs = new Set();
+    for (const list of cells.values()) {
+      for (let a = 0; a < list.length; a++) {
+        for (let b = a + 1; b < list.length; b++) {
+          const i = Math.min(list[a], list[b]);
+          const j = Math.max(list[a], list[b]);
+          if (i !== j) pairs.add(i * 1e6 + j);
+        }
+      }
+    }
+    const out = [];
+    out.oneStreetCrossings = 0; // crossings of two lines of one street, left without a gap
+    for (const key of Array.from(pairs).sort((x, y) => x - y)) {
+      yield;
+      const i = Math.floor(key / 1e6);
+      const j = key % 1e6;
+      const ei = edges[i];
+      const ej = edges[j];
+      // the two lines of one street (or one way) do not bridge each other (counted)
+      const sameStreet = oneStreet && Array.isArray(ei.wayIds) && Array.isArray(ej.wayIds) && oneStreet(ei.wayIds, ej.wayIds);
+      const shared = [];
+      for (const x of [ei.u, ei.v]) if (x === ej.u || x === ej.v) shared.push(pos.get(x));
+      const meets = [];
+      const a = polys[i];
+      const b = polys[j];
+      for (let s = 1; s < a.length; s++) {
+        for (let t = 1; t < b.length; t++) {
+          if (Math.max(b[t - 1][0], b[t][0]) < Math.min(a[s - 1][0], a[s][0]) - 1e-9 || Math.min(b[t - 1][0], b[t][0]) > Math.max(a[s - 1][0], a[s][0]) + 1e-9) continue;
+          if (Math.max(b[t - 1][1], b[t][1]) < Math.min(a[s - 1][1], a[s][1]) - 1e-9 || Math.min(b[t - 1][1], b[t][1]) > Math.max(a[s - 1][1], a[s][1]) + 1e-9) continue;
+          const hits = segmentMeetPoints(a[s - 1], a[s], b[t - 1], b[t]);
+          // Roads from a common point may run on top of each other near it (merged junctions):
+          // between those only a true crossing counts.
+          if (shared.length > 0 && hits.length > 0 && !crossesProperly(a[s - 1], a[s], b[t - 1], b[t])) continue;
+          for (const m of hits) {
+            if (shared.some((q) => Math.hypot(m[0] - q[0], m[1] - q[1]) <= SHAPE_TOUCH_M)) continue;
+            if (meets.some((q) => Math.hypot(m[0] - q.m[0], m[1] - q.m[1]) <= SHAPE_TOUCH_M)) continue;
+            meets.push({ m, s, t });
+          }
+        }
+      }
+      // Two roads from a common point that run on top of each other from the crossing to that
+      // point (a road brought to a merged junction along another one; the simpler drawn
+      // shape of one cuts the corner of the other) do not cross: no bridge.
+      const pieceTo = (poly, seg, m, q) => {
+        if (Math.hypot(poly[0][0] - q[0], poly[0][1] - q[1]) < 1e-6) return poly.slice(0, seg).concat([m]);
+        return [m].concat(poly.slice(seg));
+      };
+      const runTogether = (m, s, t) => shared.some((q) => {
+        const pa = pieceTo(a, s, m, q);
+        const pb = pieceTo(b, t, m, q);
+        if (lenXY(pa) > OVERLAP_MAX_M || lenXY(pb) > OVERLAP_MAX_M) return false;
+        return hausdorffXY(pa, pb, 1) <= OVERLAP_WITHIN_M;
+      });
+      if (sameStreet) {
+        if (meets.length > 0 && !ei.tail && !ej.tail && shared.length === 0) out.oneStreetCrossings++;
+        continue;
+      }
+      for (const { m, s, t } of meets) {
+        if (shared.length > 0 && runTogether(m, s, t)) continue;
+        const li = ei.length;
+        const lj = ej.length;
+        const overIdx = li > lj || (li === lj && i < j) ? i : j;
+        const underIdx = overIdx === i ? j : i;
+        const seg = overIdx === i ? s : t;
+        const op = polys[overIdx];
+        const oc = edges[overIdx].coords;
+        // latitude / longitude of the crossing, on the upper road's segment
+        const p0 = op[seg - 1];
+        const p1 = op[seg];
+        const segLen = Math.hypot(p1[0] - p0[0], p1[1] - p0[1]);
+        const tt = segLen > 0 ? Math.hypot(m[0] - p0[0], m[1] - p0[1]) / segLen : 0;
+        const at = [oc[seg - 1][0] + (oc[seg][0] - oc[seg - 1][0]) * tt, oc[seg - 1][1] + (oc[seg][1] - oc[seg - 1][1]) * tt];
+        // the upper road's piece around the crossing (BRIDGE_HALF_M each side)
+        const cum = cumXY(op);
+        const sAt = cum[seg - 1] + segLen * tt;
+        const L = cum[cum.length - 1];
+        const s0 = Math.max(0, sAt - BRIDGE_HALF_M);
+        const s1 = Math.min(L, sAt + BRIDGE_HALF_M);
+        const llAt = (sv) => {
+          let k = 1;
+          while (k < cum.length - 1 && cum[k] < sv) k++;
+          const sl = cum[k] - cum[k - 1];
+          const f = sl > 0 ? (sv - cum[k - 1]) / sl : 0;
+          return [oc[k - 1][0] + (oc[k][0] - oc[k - 1][0]) * f, oc[k - 1][1] + (oc[k][1] - oc[k - 1][1]) * f];
+        };
+        const overCoords = [llAt(s0)];
+        for (let k = 1; k < cum.length - 1; k++) if (cum[k] > s0 && cum[k] < s1) overCoords.push(oc[k]);
+        overCoords.push(llAt(s1));
+        const oe = edges[overIdx];
+        out.push({
+          over: overIdx,
+          under: underIdx,
+          lat: at[0],
+          lon: at[1],
+          overCoords,
+          overTail: !!oe.tail,
+          overU: oe.tail ? null : oe.u,
+          overV: oe.tail ? null : oe.v,
+          underTail: !!edges[underIdx].tail
+        });
+      }
+    }
+    return out;
+  }
+
 
   function computeGraphStats(nodes, edges) {
     let degSum = 0;
@@ -1546,42 +3748,6 @@ out skel qt;
     };
   }
 
-  // Remove degree-0 nodes, then keep the largest connected component.
-  // nodes: Map<id, { neighbors: Set<id>, ... }>, edges: [{ u, v, ... }]
-  // Returns new { nodes, edges } (node objects are copied with filtered neighbor sets).
-  function pruneToLargestComponent(nodes, edges) {
-    let best = null;
-    const seen = new Set();
-    for (const [id, n] of nodes) {
-      if (seen.has(id) || n.neighbors.size === 0) continue;
-      const comp = new Set([id]);
-      seen.add(id);
-      const stack = [id];
-      while (stack.length > 0) {
-        const cur = stack.pop();
-        for (const nb of nodes.get(cur).neighbors) {
-          if (!seen.has(nb) && nodes.has(nb)) {
-            seen.add(nb);
-            comp.add(nb);
-            stack.push(nb);
-          }
-        }
-      }
-      if (!best || comp.size > best.size) best = comp;
-    }
-
-    const outNodes = new Map();
-    if (!best) return { nodes: outNodes, edges: [] };
-
-    for (const [id, n] of nodes) {
-      if (!best.has(id)) continue;
-      const neighbors = new Set();
-      for (const nb of n.neighbors) if (best.has(nb)) neighbors.add(nb);
-      outNodes.set(id, { ...n, neighbors });
-    }
-    const outEdges = edges.filter((e) => best.has(e.u) && best.has(e.v));
-    return { nodes: outNodes, edges: outEdges };
-  }
 
   // ---------------------------------------------------------------------------
   // Board simplification (crossing edges, degree cap)
@@ -1718,21 +3884,6 @@ out skel qt;
     return findCrossingPairs(edges, polys).length;
   }
 
-  // Direction (radians) in which edge e leaves node id.
-  function edgeBearingAt(e, id, poly) {
-    const pts = e.u === id ? poly : poly.slice().reverse();
-    const start = pts[0];
-    let target = pts[pts.length - 1];
-    for (let k = 1; k < pts.length; k++) {
-      const dx = pts[k][0] - start[0];
-      const dy = pts[k][1] - start[1];
-      if (dx * dx + dy * dy >= 25) { // first point at least 5 m away
-        target = pts[k];
-        break;
-      }
-    }
-    return Math.atan2(target[1] - start[1], target[0] - start[0]);
-  }
 
   // Direction (radians) from node id towards the point `dist` metres along edge e's polyline
   // (its far end if shorter): the way the road heads, past small bends at the point itself.
@@ -1753,8 +3904,6 @@ out skel qt;
     return Math.atan2(target[1] - start[1], target[0] - start[0]);
   }
 
-  const THROUGH_LOOK_M = 30; // how far along a road its direction is taken
-  const THROUGH_MIN_ANGLE = (165 * Math.PI) / 180; // two roads this close to opposite run straight through
 
   function angleBetween(a, b) {
     let d = Math.abs(a - b) % (2 * Math.PI);
@@ -1762,231 +3911,6 @@ out skel qt;
     return d;
   }
 
-  // S6-S8: remove crossing edges, cap the degree at MAX_NODE_DEGREE without breaking
-  // connectivity, then prune dead ends (unless included) and keep the largest component.
-  // nodes/edges are not mutated. Returns { nodes, edges, info }.
-  function simplifyBoardGraph(nodesIn, edgesIn, opts = {}) {
-    const includeDeadEnds = !!opts.includeDeadEnds;
-    const maxDegree = opts.maxDegree || MAX_NODE_DEGREE;
-
-    const nodes = new Map();
-    for (const [id, n] of nodesIn) nodes.set(id, { ...n, neighbors: new Set(n.neighbors) });
-    const edges = edgesIn.slice();
-    const pairKey = (u, v) => (u < v ? `${u}|${v}` : `${v}|${u}`);
-    const edgeIndex = new Map();
-    edges.forEach((e, i) => edgeIndex.set(pairKey(e.u, e.v), i));
-    const alive = new Set(edges.map((_, i) => i));
-
-    const proj = makeProjector(nodes);
-    // polys: the drawn shapes (crossings are judged on what is drawn); roadPolys: the roads'
-    // own courses (directions and bends at a point, for the degree cap)
-    const polys = edges.map((e) => edgeCoords(e, nodes).map(([lat, lon]) => proj(lat, lon)));
-    const roadPolys = edges.map((e, i) => (Array.isArray(e.roadCoords) && e.roadCoords !== e.coords ? e.roadCoords.map(([lat, lon]) => proj(lat, lon)) : polys[i]));
-    const lengths = edges.map((e, i) => (Number.isFinite(e.length) ? e.length : polylineLengthXY(polys[i])));
-
-    const removeEdge = (i) => {
-      const e = edges[i];
-      nodes.get(e.u).neighbors.delete(e.v);
-      nodes.get(e.v).neighbors.delete(e.u);
-      alive.delete(i);
-    };
-
-    // True if removing edge i would disconnect its endpoints
-    const isBridge = (i) => {
-      const { u, v } = edges[i];
-      const seen = new Set([u]);
-      const stack = [u];
-      while (stack.length > 0) {
-        const cur = stack.pop();
-        for (const nb of nodes.get(cur).neighbors) {
-          if ((cur === u && nb === v) || (cur === v && nb === u)) continue;
-          if (nb === v) return false;
-          if (!seen.has(nb)) {
-            seen.add(nb);
-            stack.push(nb);
-          }
-        }
-      }
-      return true;
-    };
-
-    // --- S6: crossing edges. Prefer the edge involved in the most crossings, then the longer one.
-    const pairs = findCrossingPairs(edges, polys);
-    const partners = new Map();
-    for (const [a, b] of pairs) {
-      if (!partners.has(a)) partners.set(a, new Set());
-      if (!partners.has(b)) partners.set(b, new Set());
-      partners.get(a).add(b);
-      partners.get(b).add(a);
-    }
-    // Active crossing counts are updated incrementally; a max-heap (count, length) with
-    // lazy deletion picks the next candidate without rescanning all crossings.
-    const activeCount = new Map();
-    for (const [i, ps] of partners) activeCount.set(i, ps.size);
-    const heap = [];
-    const better = (a, b) => (a.count !== b.count ? a.count > b.count : a.len > b.len);
-    const push = (item) => {
-      heap.push(item);
-      let k = heap.length - 1;
-      while (k > 0) {
-        const p = (k - 1) >> 1;
-        if (!better(heap[k], heap[p])) break;
-        [heap[k], heap[p]] = [heap[p], heap[k]];
-        k = p;
-      }
-    };
-    const pop = () => {
-      const top = heap[0];
-      const last = heap.pop();
-      if (heap.length > 0) {
-        heap[0] = last;
-        let k = 0;
-        for (;;) {
-          const l = 2 * k + 1;
-          const r = l + 1;
-          let m = k;
-          if (l < heap.length && better(heap[l], heap[m])) m = l;
-          if (r < heap.length && better(heap[r], heap[m])) m = r;
-          if (m === k) break;
-          [heap[k], heap[m]] = [heap[m], heap[k]];
-          k = m;
-        }
-      }
-      return top;
-    };
-    for (const [i, count] of activeCount) push({ i, count, len: lengths[i] });
-
-    const keep = new Set(); // bridges: once a bridge, always a bridge (edges only disappear)
-    let removedForCrossing = 0;
-    while (heap.length > 0) {
-      const top = pop();
-      const i = top.i;
-      if (!alive.has(i) || keep.has(i) || top.count !== activeCount.get(i) || top.count === 0) continue;
-      if (isBridge(i)) {
-        keep.add(i);
-        continue;
-      }
-      removeEdge(i);
-      removedForCrossing++;
-      for (const j of partners.get(i)) {
-        if (!alive.has(j)) continue;
-        const c = activeCount.get(j) - 1;
-        activeCount.set(j, c);
-        if (c > 0 && !keep.has(j)) push({ i: j, count: c, len: lengths[j] });
-      }
-    }
-
-    // --- S7: degree cap. Prefer edges whose other end has a high degree, then the edge
-    //     closest in direction to a neighbouring edge. Between edges ranked equal so far
-    //     (typically the two of a narrow pair), keep the one that runs straight through the
-    //     point (another edge leaves it in the opposite direction) and drop first a road that
-    //     runs along another remaining road, then the one that bends most or whose ends
-    //     merging moved most; then the longer one. Never a bridge.
-    //     "Straight through" is judged on the drawn lines; the other directions and the
-    //     bends on the roads' own courses.
-    const bendOf = (i) => maxDevXY(roadPolys[i]) + (Number.isFinite(edges[i].endShift) ? edges[i].endShift : 0);
-    let roadBoxes = null;
-    // True if edge i's road runs along another remaining road (a duplicate line on the board)
-    const runsAlongAnother = (i) => {
-      if (!roadBoxes) roadBoxes = roadPolys.map((p) => bboxXY(p, SHAPE_OVERLAP_M));
-      const e = edges[i];
-      const bi = roadBoxes[i];
-      for (const j of alive) {
-        if (j === i) continue;
-        const bj = roadBoxes[j];
-        if (bj.maxX < bi.minX || bj.minX > bi.maxX || bj.maxY < bi.minY || bj.minY > bi.maxY) continue;
-        const o = edges[j];
-        const shared = [];
-        if (o.u === e.u || o.v === e.u) shared.push(proj(nodes.get(e.u).lat, nodes.get(e.u).lon));
-        if (o.u === e.v || o.v === e.v) shared.push(proj(nodes.get(e.v).lat, nodes.get(e.v).lon));
-        if (polylinesRunTogether(roadPolys[i], roadPolys[j], shared)) return true;
-      }
-      return false;
-    };
-    let removedForDegree = 0;
-    for (let pass = 0; pass < 1000; pass++) {
-      const over = Array.from(nodes.keys())
-        .filter((id) => nodes.get(id).neighbors.size > maxDegree)
-        .sort((a, b) => nodes.get(b).neighbors.size - nodes.get(a).neighbors.size);
-      if (over.length === 0) break;
-      let progress = false;
-      for (const nid of over) {
-        const n = nodes.get(nid);
-        if (n.neighbors.size <= maxDegree) continue;
-        const incident = Array.from(n.neighbors).map((nb) => edgeIndex.get(pairKey(nid, nb)));
-        const bearings = incident.map((i) => edgeBearingAt(edges[i], nid, roadPolys[i]));
-        const farBearings = incident.map((i) => bearingAlong(edges[i], nid, polys[i], THROUGH_LOOK_M));
-        const cands = incident.map((i, k) => {
-          let minAngle = Infinity;
-          let through = false;
-          for (let m = 0; m < incident.length; m++) {
-            if (m === k) continue;
-            minAngle = Math.min(minAngle, angleBetween(bearings[k], bearings[m]));
-            if (angleBetween(farBearings[k], farBearings[m]) >= THROUGH_MIN_ANGLE) through = true;
-          }
-          const other = edges[i].u === nid ? edges[i].v : edges[i].u;
-          return { i, otherDeg: nodes.get(other).neighbors.size, minAngle, through: through ? 1 : 0, len: lengths[i] };
-        });
-        // the later keys are needed only between candidates tied so far
-        const runs = (c) => (c.runs === undefined ? (c.runs = runsAlongAnother(c.i) ? 1 : 0) : c.runs);
-        const bend = (c) => (c.bend === undefined ? (c.bend = bendOf(c.i)) : c.bend);
-        cands.sort((a, b) =>
-          (b.otherDeg - a.otherDeg) || (a.minAngle - b.minAngle) ||
-          (runs(b) - runs(a)) || (a.through - b.through) || (bend(b) - bend(a)) || (b.len - a.len)
-        );
-        for (const c of cands) {
-          if (!isBridge(c.i)) {
-            removeEdge(c.i);
-            removedForDegree++;
-            progress = true;
-            break;
-          }
-        }
-      }
-      if (!progress) break;
-    }
-
-    // --- S8: prune dead ends (when excluded) and isolated points, keep the largest component
-    let liveEdges = edges.filter((_, i) => alive.has(i));
-    let workNodes = nodes;
-    if (!includeDeadEnds) {
-      const pruned = new Map();
-      for (const [id, n] of nodes) pruned.set(id, { ...n, neighbors: new Set(n.neighbors) });
-      let changed = true;
-      while (changed) {
-        changed = false;
-        for (const [id, n] of pruned) {
-          if (n.neighbors.size <= 1) {
-            for (const nb of n.neighbors) pruned.get(nb).neighbors.delete(id);
-            pruned.delete(id);
-            changed = true;
-          }
-        }
-      }
-      // Keep the spurs if pruning would leave too small a board (judged on the largest
-      // connected part that would remain, since only that part becomes the board)
-      const prunedAdj = new Map();
-      for (const [id, n] of pruned) prunedAdj.set(id, n.neighbors);
-      if (largestComponentSize(prunedAdj) >= MIN_BOARD_NODES) {
-        workNodes = pruned;
-        liveEdges = liveEdges.filter((e) => pruned.has(e.u) && pruned.has(e.v));
-      }
-    }
-    const largest = pruneToLargestComponent(workNodes, liveEdges);
-
-    let overDegreeRemaining = 0;
-    for (const n of largest.nodes.values()) if (n.neighbors.size > maxDegree) overDegreeRemaining++;
-
-    return {
-      nodes: largest.nodes,
-      edges: largest.edges,
-      info: {
-        crossingsRemaining: countEdgeCrossings(largest.nodes, largest.edges),
-        overDegreeRemaining,
-        removedEdges: removedForCrossing + removedForDegree
-      }
-    };
-  }
 
   function polylineLengthXY(pts) {
     let total = 0;
@@ -2002,16 +3926,6 @@ out skel qt;
   // next to a junction (often left by merging nearby junctions) are dropped. A simpler
   // line is used only if it does not create anything the real course did not have.
 
-  const SHAPE_STRAIGHT_DEV_M = 8; // road within this of its chord -> straight line
-  const SHAPE_END_ZONE_M = 25; // bends this close to a junction may be dropped...
-  const SHAPE_END_DEV_M = 8; // ...if the line stays within this of the road there
-  const SHAPE_DP_TOL_M = 6; // Douglas-Peucker tolerance for the rest of the road
-  const SHAPE_NEAR_NODE_M = 8; // a line must not newly pass this close to another point
-  const SHAPE_OVERLAP_M = 10; // two lines this close over a long stretch run together
-  const SHAPE_OVERLAP_MIN_M = 20;
-  const SHAPE_OVERLAP_SHARED_M = 15; // ignored around a point both lines start from
-  const SHAPE_TOUCH_M = 1; // where two lines meet at a shared point
-  const SHAPE_SLACK_M = 1; // borderline cases count against the simpler shape
 
   function pointSegDistXY(p, a, b) {
     const abx = b[0] - a[0];
@@ -2076,7 +3990,9 @@ out skel qt;
   function candidateShapeIdx(pts, rawPts) {
     const n = pts.length;
     if (n <= 2) return pts.map((_, i) => i);
-    if (maxDevXY(pts) < SHAPE_STRAIGHT_DEV_M || (rawPts && maxDevXY(rawPts) < SHAPE_STRAIGHT_DEV_M)) return [0, n - 1];
+    // (rawPts, the road between its original junctions, is not used: the 4 m / 2.5 m limits
+    // apply to the line as drawn, ends moved or not)
+    if (maxDevXY(pts) < SHAPE_STRAIGHT_DEV_M) return [0, n - 1];
     let idx = pts.map((_, i) => i);
     // from the start: drop the bend next to the end while allowed
     while (idx.length > 2) {
@@ -2120,6 +4036,40 @@ out skel qt;
     const E = 1e-9;
     if (t < -E || t > 1 + E || u < -E || u > 1 + E) return [];
     return [[a0[0] + rx * t, a0[1] + ry * t]];
+  }
+
+  // Points where polylines a and b meet farther than SHAPE_TOUCH_M from the points in
+  // `shared` (points closer than SHAPE_TOUCH_M to each other count once)
+  function meetPointsAwayFrom(a, b, shared) {
+    const out = [];
+    for (let i = 1; i < a.length; i++) {
+      const a0 = a[i - 1];
+      const a1 = a[i];
+      for (let j = 1; j < b.length; j++) {
+        const b0 = b[j - 1];
+        const b1 = b[j];
+        if (Math.max(b0[0], b1[0]) < Math.min(a0[0], a1[0]) || Math.min(b0[0], b1[0]) > Math.max(a0[0], a1[0])) continue;
+        if (Math.max(b0[1], b1[1]) < Math.min(a0[1], a1[1]) || Math.min(b0[1], b1[1]) > Math.max(a0[1], a1[1])) continue;
+        for (const p of segmentMeetPoints(a0, a1, b0, b1)) {
+          if (shared.some((s) => Math.hypot(p[0] - s[0], p[1] - s[1]) <= SHAPE_TOUCH_M)) continue;
+          if (out.some((q) => Math.hypot(p[0] - q[0], p[1] - q[1]) <= SHAPE_TOUCH_M)) continue;
+          out.push(p);
+        }
+      }
+    }
+    return out;
+  }
+
+  // Pairs of meeting points [lineIndex, point] of different lines within SHAPE_TOUCH_M
+  function closeMeetPairs(list) {
+    let n = 0;
+    for (let x = 0; x < list.length; x++) {
+      for (let y = x + 1; y < list.length; y++) {
+        if (list[x][0] === list[y][0]) continue;
+        if (Math.hypot(list[x][1][0] - list[y][1][0], list[x][1][1] - list[y][1][1]) <= SHAPE_TOUCH_M) n++;
+      }
+    }
+    return n;
   }
 
   // True if polylines a and b meet anywhere farther than SHAPE_TOUCH_M from the points in `shared`
@@ -2235,28 +4185,32 @@ out skel qt;
   //  - a junction merged into B lies within ALIGN_ON_ROAD_M of A-C's road, or B's road to A
   //    or C starts at a junction merged into B and runs within ALIGN_CARRIAGEWAY_M of A-C's
   //    road all along (the other carriageway of the same street);
-  //  - B was merged from two or more junctions (merging moved it);
+  //  - B was merged from two or more junctions (merging moved it), and opts.canMove(B)
+  //    allows it (the board moves junctions only, never dead ends or shape points);
   //  - B moves at most r, ends at least r from every other point, no point drops below
-  //    opts.minDegree roads, and the board gets no new crossing (of roads with or without a
+  //    opts.minDegree roads (or opts.minDegreeOf(id): by the kind of the point, e.g. 1 for a
+  //    dead end, 2 otherwise), and the board gets no new crossing (of roads with or without a
   //    shared point), no new narrow angle (< ALIGN_NARROW_DEG) at B or any point joined
   //    to B, A or C, and no more roads running together or passing close to a point.
   // Candidates are taken in the order of their end point ids, so the result does not depend
   // on the order of the input data.
   // B's other roads keep their course with the end moved to B's new place.
-  const ALIGN_ON_ROAD_M = 5;
-  const ALIGN_CARRIAGEWAY_M = 20; // the other carriageway stays this close to the road
-  const ALIGN_MAX_APPLIED = 200;
-  const ALIGN_GUARD_DEGREE = true; // skip a move that would leave a point with fewer than 2 roads
-  const ALIGN_MAX_REJECTED = 400; // candidates that failed the checks (bounds the work)
-  const ALIGN_NARROW_DEG = 15;
-  const ALIGN_KINK_MIN_DEG = 135; // second form: A-B-C bends by at most 45 degrees at B
-  const ALIGN_KINK_ON_LINE_M = 8; // ...the junction the road passes is this close to A-C
-  const ALIGN_KINK_MIN_OFFSET_M = 5; // ...and merging moved B at least this much further off
 
   function alignPointsOntoRoads(nodesIn, edgesIn, r, memberPos, opts = {}) {
+    return runGenSync(alignPointsOntoRoadsGen(nodesIn, edgesIn, r, memberPos, opts));
+  }
+
+  function* alignPointsOntoRoadsGen(nodesIn, edgesIn, r, memberPos, opts = {}) {
     const applied = [];
     if (!(r > 0) || !memberPos || edgesIn.length === 0) return { nodes: nodesIn, edges: edgesIn, applied };
     const minDegree = opts.minDegree || 0; // no point may end with fewer roads than this (if it had them)
+    const minDegreeOf = typeof opts.minDegreeOf === 'function' ? opts.minDegreeOf : () => minDegree;
+    const canMove = typeof opts.canMove === 'function' ? opts.canMove : () => true;
+    const unionWays = (...es) => {
+      const set = new Set();
+      for (const e of es) if (e && Array.isArray(e.wayIds)) for (const w of e.wayIds) set.add(w);
+      return Array.from(set).sort((a, b) => (typeof a === 'number' && typeof b === 'number' ? a - b : String(a) < String(b) ? -1 : String(a) > String(b) ? 1 : 0));
+    };
     const nodes = new Map();
     for (const [id, n] of nodesIn) nodes.set(id, { ...n, neighbors: new Set(n.neighbors) });
     const keyOf = (a, b) => (a < b ? `${a}|${b}` : `${b}|${a}`);
@@ -2445,7 +4399,7 @@ out skel qt;
       for (const e of added) { touched.add(e.u); touched.add(e.v); }
       for (const id of touched) {
         const before = nodes.get(id).neighbors.size;
-        if ((deg.get(id) || 0) < Math.min(before, minDegree)) { rejected++; return false; }
+        if ((deg.get(id) || 0) < Math.min(before, minDegreeOf(id))) { rejected++; return false; }
       }
       const oldSet = new Set(edges.filter((e) => replaced.has(e) || e.u === B || e.v === B));
       const crossBefore = crossingsInvolving(edges, oldSet);
@@ -2492,6 +4446,7 @@ out skel qt;
     // First form: the road A-C still exists
     const queue = edges.slice();
     for (let qi = 0; qi < queue.length && canTry(); qi++) {
+      yield;
       const ac = queue[qi];
       if (byKey.get(keyOf(ac.u, ac.v)) !== ac) continue; // replaced meanwhile
       const A = ac.u;
@@ -2510,7 +4465,7 @@ out skel qt;
         if (B === A || B === C || !canTry()) continue;
         const nb = nodes.get(B);
         const members = memberPos.get(B) || [];
-        if (members.length < 2) continue; // only a point moved by merging
+        if (members.length < 2 || !canMove(B)) continue; // only a point moved by merging
         const pb = P(B);
         if (pb[0] < box.minX || pb[0] > box.maxX || pb[1] < box.minY || pb[1] > box.maxY) continue;
         if (Math.min(pointPolyDistXY(pb, acXY), pointSegDistXY(pb, pa, pc)) > r) continue;
@@ -2541,12 +4496,21 @@ out skel qt;
         const roadC = [newPos].concat(road.slice(roadAt.seg));
         const rawA = ac.rawEnds ? ac.rawEnds[0] : road[0];
         const rawC = ac.rawEnds ? ac.rawEnds[1] : road[road.length - 1];
+        // the pieces are drawn along the road (the drawn shapes are made simpler afterwards)
         const added = [
-          makeEdge(A, B, [road[0], newPos], roadA, rawA, onRoad),
-          makeEdge(B, C, [newPos, road[road.length - 1]], roadC, onRoad, rawC)
+          makeEdge(A, B, roadA, roadA, rawA, onRoad),
+          makeEdge(B, C, roadC, roadC, onRoad, rawC)
         ];
         const replaced = new Set([ac]);
         for (const X of [A, C]) if (byKey.has(keyOf(B, X))) replaced.add(byKey.get(keyOf(B, X)));
+        // The source roads (way ids, represented length) go with the pieces that replace them
+        const acSrc = Number.isFinite(ac.srcLength) ? ac.srcLength : ac.length;
+        [A, C].forEach((X, k) => {
+          const old = byKey.get(keyOf(B, X));
+          added[k].wayIds = unionWays(ac, old);
+          const share = ac.length > 0 ? added[k].length / ac.length : 0.5;
+          added[k].srcLength = acSrc * share + (old ? (Number.isFinite(old.srcLength) ? old.srcLength : old.length) : 0);
+        });
         if (tryApply(B, newPos, replaced, added, { form: 'road', via, road: [A, C] })) {
           for (const e of edges) if (e.u === B || e.v === B) queue.push(e); // check the new pieces too
           break;
@@ -2554,15 +4518,15 @@ out skel qt;
       }
     }
 
-    // Second form: the straight road A-C was already dropped (by the degree cap) and B sits
-    // in a kink A-B-C: B's roads to A and C both follow the line A-C (within
+    // Second form: there is no straight road A-C and B sits in a kink A-B-C: B's roads to A and C both follow the line A-C (within
     // ALIGN_CARRIAGEWAY_M) and start at the same junction m merged into B; m lies within
     // ALIGN_KINK_ON_LINE_M of the line, B at least ALIGN_KINK_MIN_OFFSET_M further off.
     // B is moved onto the line A-C, at the foot of m; the same limits apply.
     for (const B of Array.from(nodes.keys()).sort()) {
+      yield;
       if (!canTry()) break;
       const members = memberPos.get(B) || [];
-      if (members.length < 2) continue;
+      if (members.length < 2 || !canMove(B)) continue;
       const nb = nodes.get(B);
       const around = Array.from(nb.neighbors).sort();
       let done = false;
@@ -2606,9 +4570,7 @@ out skel qt;
           const straightTo = (e, X) => {
             const moveEnd = (cc) => (e.u === B ? [newPos].concat(cc.slice(1)) : cc.slice(0, -1).concat([newPos]));
             const rc = moveEnd(e.roadCoords || e.coords);
-            const px = [nodes.get(X).lat, nodes.get(X).lon];
-            const drawn = e.u === B ? [newPos, px] : [px, newPos];
-            return { ...e, coords: drawn, roadCoords: rc, length: polylineLength(rc), endShift: endShiftMeters(rc, e.rawEnds) };
+            return { ...e, coords: rc, roadCoords: rc, length: polylineLength(rc), endShift: endShiftMeters(rc, e.rawEnds) };
           };
           done = tryApply(B, newPos, new Set([eBA, eBC]), [straightTo(eBA, A), straightTo(eBC, C)], { form: 'kink', road: [A, C] });
         }
@@ -2620,12 +4582,17 @@ out skel qt;
 
   // Returns new edge objects whose `coords` is the drawn shape; the road's own course (with
   // its ends at the merged points) stays in `roadCoords`. An edge keeps its current line if
-  // the simpler shape would change which drawn lines it crosses, newly run along one, newly
-  // pass within SHAPE_NEAR_NODE_M of a point that is not its end, cross itself, fold back
-  // more sharply or leave `bounds`. Edges are taken in order; each check is against the
-  // lines chosen so far, so the set of crossing pairs never changes. Running it again only
-  // tries the edges not yet simplified (or changed since).
+  // the simpler shape would change how many times it meets another drawn line (each pair
+  // counted, roads sharing a point included), make three lines meet at one place, newly run
+  // along a line, newly pass within SHAPE_NEAR_NODE_M of a point that is not its end, be
+  // (nearly) zero long, cross itself, fold back more sharply or leave `bounds`. Edges are
+  // taken in order; each check is against the lines chosen so far, so the crossings never
+  // change. Running it again only tries the edges not yet simplified (or changed since).
   function buildDisplayShapes(nodes, edgesIn, bounds) {
+    return runGenSync(buildDisplayShapesGen(nodes, edgesIn, bounds));
+  }
+
+  function* buildDisplayShapesGen(nodes, edgesIn, bounds) {
     const edges = edgesIn.map((e) => ({ ...e, roadCoords: e.roadCoords || e.coords }));
     if (edges.length === 0) return edges;
     const proj = makeMetricProjector(nodes);
@@ -2670,6 +4637,7 @@ out skel qt;
     );
 
     for (let i = 0; i < edges.length; i++) {
+      yield;
       const e = edges[i];
       const rp = road[i];
       let rawPts = null;
@@ -2683,6 +4651,7 @@ out skel qt;
       const cand = keepIdx.map((k) => rp[k]);
       const candLatLon = keepIdx.map((k) => e.roadCoords[k]);
       if (!candLatLon.every(inside)) continue;
+      if (polylineLengthXY(cand) < SHAPE_MIN_LEN_M) continue;
       if (polylineSelfIntersects(cand)) continue;
       if (countFoldBacks(cand) > countFoldBacks(cur[i])) continue;
       // Look around both the simpler line and the current one: a road the current line
@@ -2700,7 +4669,9 @@ out skel qt;
       });
       const near = new Set();
       if (ok) inCells(edgeCells, box, (j) => { near.add(j); });
-      for (const j of near) {
+      const meetsCand = [];
+      const meetsCur = [];
+      for (const j of Array.from(near).sort((x, y) => x - y)) {
         if (!ok) break;
         if (j === i) continue;
         const bj = boxes[j];
@@ -2712,12 +4683,18 @@ out skel qt;
         // The same roads cross as with the lines drawn now (so removing crossing roads gives
         // the same result, and a later pass cannot bring back a crossing), and no pair runs
         // together that did not on the roads' own courses.
-        if (polylinesMeetAwayFrom(cand, cur[j], shared) !== polylinesMeetAwayFrom(cur[i], cur[j], shared)) ok = false;
+        const mc = meetPointsAwayFrom(cand, cur[j], shared);
+        const mo = meetPointsAwayFrom(cur[i], cur[j], shared);
+        if (mc.length !== mo.length) ok = false;
         else if (
           polylinesRunTogether(cand, cur[j], shared, SHAPE_OVERLAP_M + SHAPE_SLACK_M) &&
           !polylinesRunTogether(rp, road[j], shared, SHAPE_OVERLAP_M - SHAPE_SLACK_M)
         ) ok = false;
+        for (const m of mc) meetsCand.push([j, m]);
+        for (const m of mo) meetsCur.push([j, m]);
       }
+      // Three lines meeting at one place (this line through another pair's meeting point)
+      if (ok && closeMeetPairs(meetsCand) > closeMeetPairs(meetsCur)) ok = false;
       if (!ok) continue;
       cur[i] = cand;
       boxes[i] = bboxXY(cand, 0);
@@ -2727,49 +4704,7 @@ out skel qt;
   }
 
   function wantedNodes(targetNodes) {
-    return Math.max(MIN_BOARD_NODES, Math.floor(targetNodes * 0.85));
-  }
-
-  // Distance (m) from the centre to a corner of the auto-selected square
-  function squareCornerMeters(graph) {
-    if (!graph.boardBounds) return 0;
-    return ((graph.boardBounds.north - graph.boardBounds.south) / 2) * 111000 * Math.SQRT2;
-  }
-
-  // Build the board; if it falls short of the wanted size, first try larger squares within
-  // the data already at hand (coverage = radius in metres the data is complete for).
-  // Returns { graph, hitCoverage } where hitCoverage tells whether more data could help.
-  function buildWithLocalGrowth(elements, lat, lon, optionsIn, coverage) {
-    const targetNodes = optionsIn.targetNodes || 81;
-    const want = wantedNodes(targetNodes);
-    // The square's margin stays within the data coverage and the size limit of the
-    // requested board (not of the enlarged targets tried below).
-    const options = {
-      ...optionsIn,
-      coverageM: coverage,
-      maxNodes: Math.min(MAX_BOARD_NODES, SQUARE_MARGIN_MAX_RATIO * targetNodes),
-      minNodes: SQUARE_MARGIN_MIN_RATIO * targetNodes
-    };
-    let best = buildRoadGraph(elements, lat, lon, options);
-    if (best.stats.nodeCount >= want) return { graph: best, hitCoverage: false };
-    if (squareCornerMeters(best) > coverage) return { graph: best, hitCoverage: true };
-
-    let t = targetNodes;
-    for (let k = 0; k < 16 && best.stats.nodeCount < want; k++) {
-      t = Math.ceil(t * 1.25);
-      if (t > EARLY_TOO_MANY_FACTOR * MAX_BOARD_NODES) break;
-      let g;
-      try {
-        g = buildRoadGraph(elements, lat, lon, { ...options, targetNodes: t });
-      } catch (err) {
-        if (err && err.kind === 'too-many') break;
-        throw err;
-      }
-      if (squareCornerMeters(g) > coverage) return { graph: best, hitCoverage: true };
-      if (g.stats.nodeCount > best.stats.nodeCount) best = g;
-      if (g.stats.nodeCount === 0 && t > 4 * targetNodes) break;
-    }
-    return { graph: best, hitCoverage: false };
+    return Math.max(MIN_BOARD_NODES, Math.floor(targetNodes * SQUARE_MIN_RATIO));
   }
 
   // ctx: { signal, allowNetwork } — allowNetwork=false restricts to bundled / cached data.
@@ -2795,11 +4730,18 @@ out skel qt;
     const mode = options.includeFootways ? 'all' : 'simple';
 
     const targetNodes = options.targetNodes || 81;
-    let radius = Math.max(300, Math.round(Math.sqrt(targetNodes) * 45));
-    if (!allowNetwork && !findCachedEntry(location.lat, location.lon, radius, mode)) {
-      // Offline (initial board): shrink the request to what the bundled data covers
+    // First request: large enough for the square the search picks (corner distance up to
+    // ~92 x sqrt(target) m on the 11 bundled places; the square moved afterwards keeps its
+    // corners within the data), so a second request is rarely needed; never past the largest
+    // radius asked for (3000 m)
+    let radius = Math.min(3000, Math.max(400, Math.round(Math.sqrt(targetNodes) * FIRST_RADIUS_PER_SQRT_M)));
+    if (!findCachedEntry(location.lat, location.lon, radius, mode)) {
+      // Data at hand (bundled / fetched earlier) that covers what the former first request
+      // (sqrt(target) x 45 m) covered is used as it is: never more requests than before.
+      // Offline (initial board): whatever the bundled data covers.
       const maxR = maxCachedRadius(location.lat, location.lon, mode);
-      if (maxR > 0) radius = maxR;
+      const former = Math.max(300, Math.round(Math.sqrt(targetNodes) * 45));
+      if (maxR > 0 && (!allowNetwork || maxR >= former)) radius = Math.min(radius, maxR);
     }
     let graph = null;
 
@@ -2812,14 +4754,16 @@ out skel qt;
       const coverage = cachedBefore ? cachedBefore.coverage : radius;
 
       report('交差点グラフを構築中...');
-      const built = buildWithLocalGrowth(elements, location.lat, location.lon, options, coverage);
+      const t0 = nowMs();
+      const prep = prepareRoadData(elements);
+      const built = await runGenAsync(searchSquareGen(prep, location.lat, location.lon, options, coverage), signal);
       graph = built.graph;
+      graph.stats.totalMs = Math.round(nowMs() - t0);
 
       if (graph.stats.nodeCount >= wantedNodes(targetNodes) || radius >= 2800 || attempt === 2) {
         break;
       }
       // A new fetch only helps when the square had to reach beyond the data we have.
-      // (A short count caused by pruning dangling spurs would not improve with more data.)
       if (!built.hitCoverage) break;
       const nextRadius = Math.min(3000, Math.round(radius * 1.85));
       if (!allowNetwork && !findCachedRoads(location.lat, location.lon, nextRadius, mode)) {
@@ -2871,12 +4815,15 @@ out skel qt;
     }
 
     report('範囲内の交差点グラフを構築中...');
-    const graph = buildRoadGraph(elements, centerLat, centerLon, {
-      ...options,
-      bounds
-    });
+    const t0 = nowMs();
+    const prep = prepareRoadData(elements);
+    const graph = await runGenAsync(buildBoardGen(prep, bounds, options), signal);
+    graph.stats.totalMs = Math.round(nowMs() - t0);
 
     throwIfAborted(signal);
+    if (graph.stats.nodeCount > MAX_BOARD_NODES) {
+      throw new StreetGoError('too-many', `交点が多すぎます(${graph.stats.nodeCount}点)。範囲を狭めてください`);
+    }
     assertPlayableBoard(graph ? graph.stats.nodeCount : 0);
 
     return {
@@ -2901,6 +4848,8 @@ out skel qt;
     stoneDiameterPx,
     nodeStoneDiameters,
     pickNodeAtPoint,
+    neighborsClockwise,
+    nextInCycle,
     MIN_DRAW_SIDE_PX,
     MAX_DRAW_SIDE_M,
     MAX_DRAW_ASPECT,
@@ -2908,8 +4857,8 @@ out skel qt;
     DRAW_FETCH_MARGIN_M,
     // exposed for tests / tooling
     buildRoadGraph,
-    pruneToLargestComponent,
-    simplifyBoardGraph,
+    prepareRoadData,
+    buildBoardSteps: (elements, bounds, options = {}) => buildBoardGen(prepareRoadData(elements), bounds, options),
     buildDisplayShapes,
     alignPointsOntoRoads,
     countEdgeCrossings,
@@ -2932,7 +4881,8 @@ out skel qt;
     OVERPASS_ENDPOINTS,
     MIN_BOARD_NODES,
     MAX_BOARD_NODES,
-    MAX_NODE_DEGREE,
+    SQUARE_MIN_RATIO,
+    SQUARE_MAX_RATIO,
     DEFAULT_MERGE_RADIUS_M,
     MAX_OVERPASS_ELEMENTS
   };
